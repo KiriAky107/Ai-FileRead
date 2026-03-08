@@ -83,6 +83,7 @@ settings.json内容如下：
 但，可以保留.env.example文件，以示需要调用的api key
 
 ## 关于git账户
+直接在终端输入以下命令
 ```bash
 #全局设置
 git config --global user.name "你的名字"
