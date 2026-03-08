@@ -52,6 +52,18 @@ settings.json内容如下：
 ```
 保存即可
 
+或者点击python解释器
+![](image/image.png)
+
+如果你完成了上述setting.json的配置，可以直接选择第三个使用 xxx 设置中的python xxx
+否则点击箭头指示的输入解释器路径
+![](image/image-1.png)
+
+找到你项目路径的\venv\Scripts\python.exe
+![alt text](image\image-2.png)
+    例如我的：H:\OwnProject\FilesReadSysteam\backend\venv\Scripts\python.exe (记得加上这个.exe)
+输入进去即可
+
 ## 关于.gitignore
 为了在上传git仓库时，不把venv中的软件包和其他关于项目的特殊api key暴露，请将.gitignore文件放在项目根目录下，并添加以下内容：
 ```bash
@@ -70,7 +82,28 @@ settings.json内容如下：
 为了数据安全，请不要把api key暴露，请将api key保存在.env文件中，并添加到.gitignore中（正如前文所示），这样git就不会将api key上传到git仓库中。
 但，可以保留.env.example文件，以示需要调用的api key
 
-### 预计项目结构：
+## 关于git账户
+```bash
+#全局设置
+git config --global user.name "你的名字"
+git config --global user.email "你的邮箱@example.com"
+
+#单个项目设置
+cd 你的项目路径
+git config user.name "你的项目专用名字"
+git config user.email "你的项目专用邮箱@example.com"
+
+#验证
+git config --list #查看所有配置
+
+git config user.name #查看单条
+git config user.email #同上
+
+#如果想看全局的，可以加上 --global，例如 git config --global user.name
+```
+
+## 预计项目结构：
+
 ```bash
 FilesReadSystem/
 ├── backend/                      # 后端服务（Python + FastAPI）
