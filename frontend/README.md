@@ -3,7 +3,7 @@
 > 注意，本文档仅为前端开发过程中团队交流使用，非正式的readme文档。
 
 
-> 以下为官方自带说明，请忽略，并在你完成前端环境构建后，把此README.md移动到frontend目录下，替换自动生成的那个（正文开始在下面）
+> 以下为官方自带说明，请忽略（正文开始在下面）
 
 # 前端项目说明
 
@@ -78,6 +78,10 @@ npm create vue@latest
 ✔ Add ESLint for code quality? … **Yes** (代码规范)
 ✔ Add Prettier for code formatting? … **Yes** (代码格式化)
 ```
+
+实验特性不选就行
+
+跳过所有示例代码，创建一个空白的Vue项目 Yes
 
 完成后输入
 ```sh
