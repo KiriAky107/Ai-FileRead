@@ -99,3 +99,31 @@ npm run dev
 说明构建成功，ctrl+鼠标左键点击第一个网址即可查看当前页面
 在终端输入q即可退出调试
 
+## 关于`.gitignore`
+
+根目录下`.gitignore`文件修改如下：
+```sh
+/.git/
+/.gitignore
+/.idea/
+/.vscode/
+/backend/venv/
+/backend/command/
+/backend/.env
+/backend/.env.local
+/backend/.env.*.local
+/backend/app/__pycache__/
+
+# 前端忽略
+/frontend/* 
+!/frontend/README.md
+!/frontend/image/
+# 在你自己构建好后，请删除上面这三行
+/frontend/node_modules/
+/frontend/dist/
+/frontend/build/
+/frontend/.env
+/frontend/.vscode/
+/frontend/.idea/
+/frontend/*.log
+```
