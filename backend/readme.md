@@ -103,6 +103,21 @@ git config user.email #同上
 #如果想看全局的，可以加上 --global，例如 git config --global user.name
 ```
 
+## 启动后端项目
+在终端输入以下命令：
+```bash
+cd backend  #确保启动时在后端跟目录下
+./venv/Scripts/python.exe -m uvicorn app.main:app --host 127.0.0.1 --port 8000
+ --reload #启动后端项目
+```
+先启动后端项目，再启动前端项目
+
+记得在你的.gitignore中添加：
+```
+/backend/data/uploads
+/backend/data/charts
+```
+
 ## 预计项目结构：
 
 ```bash
