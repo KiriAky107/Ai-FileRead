@@ -103,6 +103,14 @@ git config user.email #同上
 #如果想看全局的，可以加上 --global，例如 git config --global user.name
 ```
 
+需要更新以下库
+先进入虚拟机
+```bash
+cd backend
+.\venv\Scripts\Activate.ph1
+pip install -r requirements.txt
+```
+
 ## 启动后端项目
 在终端输入以下命令：
 ```bash
