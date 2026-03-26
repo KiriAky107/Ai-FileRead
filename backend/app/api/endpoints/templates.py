@@ -4,6 +4,7 @@
 提供模板上传、解析和填写功能
 """
 import io
+import logging
 from typing import List, Optional
 
 from fastapi import APIRouter, File, HTTPException, Query, UploadFile
@@ -222,7 +223,3 @@ async def export_filled_template(
     except Exception as e:
         logger.error(f"导出失败: {str(e)}")
         raise HTTPException(status_code=500, detail=f"导出失败: {str(e)}")
-
-
-# ==================== 需要添加的 import ====================
-import logging

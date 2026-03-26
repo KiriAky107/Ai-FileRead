@@ -34,7 +34,7 @@ class Settings(BaseSettings):
     UPLOAD_DIR: str = "data/uploads"
 
     # ==================== RAG/向量数据库配置 ====================
-    CHROMADB_PERSIST_DIR: str = "data/chromadb"
+    FAISS_INDEX_DIR: str = "data/faiss"
 
     # 允许 Pydantic 从 .env 文件读取
     model_config = SettingsConfigDict(

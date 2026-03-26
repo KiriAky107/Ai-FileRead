@@ -246,6 +246,150 @@ class ExcelStorageService:
             logger.error(f"存储 Excel 到 MySQL 失败: {str(e)}")
             return {"success": False, "error": str(e)}
 
+    async def store_structured_data(
+        self,
+        table_name: str,
+        data: Dict[str, Any],
+        source_doc_id: str = None
+    ) -> Dict[str, Any]:
+        """
+        将结构化数据（从非结构化文档提取的表格）存储到 MySQL
+
+        Args:
+            table_name: 表名
+            data: 结构化数据，格式为:
+                {
+                    "columns": ["col1", "col2"],  # 列名
+                    "rows": [["val1", "val2"], ["val3", "val4"]]  # 数据行
+                }
+            source_doc_id: 源文档 ID
+
+        Returns:
+            存储结果
+        """
+        results = {
+            "success": True,
+            "table_name": table_name,
+            "row_count": 0,
+            "columns": []
+        }
+
+        try:
+            columns = data.get("columns", [])
+            rows = data.get("rows", [])
+
+            if not columns or not rows:
+                return {"success": False, "error": "数据为空"}
+
+            # 清理列名
+            sanitized_columns = [self._sanitize_column_name(c) for c in columns]
+
+            # 推断列类型
+            column_types = {}
+            for i, col in enumerate(columns):
+                col_values = [row[i] for row in rows if i < len(row)]
+                # 根据数据推断类型
+                col_type = self._infer_type_from_values(col_values)
+                column_types[col] = col_type
+                results["columns"].append({
+                    "original_name": col,
+                    "sanitized_name": self._sanitize_column_name(col),
+                    "type": col_type
+                })
+
+            # 创建表
+            model_class = self._create_table_model(table_name, columns, column_types)
+
+            # 创建表结构
+            async with self.mysql_db.get_session() as session:
+                model_class.__table__.create(session.bind, checkfirst=True)
+
+            # 插入数据
+            records = []
+            for row in rows:
+                record = {}
+                for i, col in enumerate(columns):
+                    if i >= len(row):
+                        continue
+                    col_name = self._sanitize_column_name(col)
+                    value = row[i]
+                    col_type = column_types.get(col, "TEXT")
+
+                    # 处理空值
+                    if value is None or str(value).strip() == '':
+                        record[col_name] = None
+                    elif col_type == "INTEGER":
+                        try:
+                            record[col_name] = int(value)
+                        except (ValueError, TypeError):
+                            record[col_name] = None
+                    elif col_type == "FLOAT":
+                        try:
+                            record[col_name] = float(value)
+                        except (ValueError, TypeError):
+                            record[col_name] = None
+                    else:
+                        record[col_name] = str(value)
+
+                records.append(record)
+
+            # 批量插入
+            async with self.mysql_db.get_session() as session:
+                for record in records:
+                    session.add(model_class(**record))
+                await session.commit()
+
+            results["row_count"] = len(records)
+            logger.info(f"结构化数据已存储到 MySQL 表 {table_name}，共 {len(records)} 行")
+
+            return results
+
+        except Exception as e:
+            logger.error(f"存储结构化数据到 MySQL 失败: {str(e)}")
+            return {"success": False, "error": str(e)}
+
+    def _infer_type_from_values(self, values: List[Any]) -> str:
+        """
+        根据值列表推断列类型
+
+        Args:
+            values: 值列表
+
+        Returns:
+            类型名称
+        """
+        non_null_values = [v for v in values if v is not None and str(v).strip() != '']
+        if not non_null_values:
+            return "TEXT"
+
+        # 检查是否全是整数
+        is_integer = all(self._is_integer(v) for v in non_null_values)
+        if is_integer:
+            return "INTEGER"
+
+        # 检查是否全是浮点数
+        is_float = all(self._is_float(v) for v in non_null_values)
+        if is_float:
+            return "FLOAT"
+
+        return "TEXT"
+
+    def _is_integer(self, value: Any) -> bool:
+        """判断值是否可以转为整数"""
+        try:
+            int(value)
+            return True
+        except (ValueError, TypeError):
+            return False
+
+    def _is_float(self, value: Any) -> bool:
+        """判断值是否可以转为浮点数"""
+        try:
+            float(value)
+            return True
+        except (ValueError, TypeError):
+            return False
+
     async def query_table(
         self,
         table_name: str,
