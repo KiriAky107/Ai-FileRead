@@ -29,6 +29,11 @@ class Settings(BaseSettings):
     LLM_BASE_URL: str = "https://api.minimax.chat"
     LLM_MODEL_NAME: str = "MiniMax-Text-01"
 
+    # ==================== Supabase 配置 ====================
+    SUPABASE_URL: str = ""
+    SUPABASE_ANON_KEY: str = ""
+    SUPABASE_SERVICE_KEY: str = ""
+
     # ==================== 文件路径配置 ====================
     BASE_DIR: Path = Path(__file__).resolve().parent.parent.parent
     UPLOAD_DIR: str = "data/uploads"

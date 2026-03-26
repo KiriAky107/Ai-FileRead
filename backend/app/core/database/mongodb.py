@@ -237,7 +237,6 @@ class MongoDB:
         # RAG索引集合索引
         await self.rag_index.create_index("table_name")
         await self.rag_index.create_index("field_name")
-        await self.rag_index.create_index([("embedding", "hnsw", {"type": "knnVector"})])
 
         logger.info("MongoDB 索引创建完成")
 

@@ -6,7 +6,6 @@ import FormFill from '@/pages/FormFill';
 import Assistant from '@/pages/Assistant';
 import ExcelParse from '@/pages/ExcelParse';
 import MainLayout from '@/components/layouts/MainLayout';
-import { RouteGuard } from '@/components/common/RouteGuard';
 
 export const routes = [
   {
@@ -15,11 +14,7 @@ export const routes = [
   },
   {
     path: '/',
-    element: (
-      <RouteGuard>
-        <MainLayout />
-      </RouteGuard>
-    ),
+    element: <MainLayout />,
     children: [
       {
         path: '/',
