@@ -1,17 +1,12 @@
 import { createBrowserRouter, Navigate } from 'react-router-dom';
-import Login from '@/pages/Login';
 import Dashboard from '@/pages/Dashboard';
 import Documents from '@/pages/Documents';
-import FormFill from '@/pages/FormFill';
-import Assistant from '@/pages/Assistant';
-import ExcelParse from '@/pages/ExcelParse';
+import TemplateFill from '@/pages/TemplateFill';
+import InstructionChat from '@/pages/InstructionChat';
+import TaskHistory from '@/pages/TaskHistory';
 import MainLayout from '@/components/layouts/MainLayout';
 
 export const routes = [
-  {
-    path: '/login',
-    element: <Login />,
-  },
   {
     path: '/',
     element: <MainLayout />,
@@ -26,15 +21,15 @@ export const routes = [
       },
       {
         path: '/form-fill',
-        element: <FormFill />,
+        element: <TemplateFill />,
       },
       {
         path: '/assistant',
-        element: <Assistant />,
+        element: <InstructionChat />,
       },
       {
-        path: '/excel-parse',
-        element: <ExcelParse />,
+        path: '/task-history',
+        element: <TaskHistory />,
       },
     ],
   },

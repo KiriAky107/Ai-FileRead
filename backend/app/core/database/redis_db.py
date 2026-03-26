@@ -144,12 +144,19 @@ class RedisDB:
         Returns:
             是否成功
         """
-        key = f"task:{task_id}"
-        data = {
-            "status": status,
-            "meta": meta or {},
-        }
-        return await self.set_json(key, data, expire)
+        if not self._connected or not self.client:
+            logger.warning(f"Redis未连接，跳过任务状态更新: {task_id}")
+            return False
+        try:
+            key = f"task:{task_id}"
+            data = {
+                "status": status,
+                "meta": meta or {},
+            }
+            return await self.set_json(key, data, expire)
+        except Exception as e:
+            logger.warning(f"设置任务状态失败: {task_id}, error: {e}")
+            return False
 
     async def get_task_status(self, task_id: str) -> Optional[Dict[str, Any]]:
         """
@@ -161,8 +168,15 @@ class RedisDB:
         Returns:
             状态信息
         """
-        key = f"task:{task_id}"
-        return await self.get_json(key)
+        if not self._connected or not self.client:
+            logger.warning(f"Redis未连接，无法获取任务状态: {task_id}")
+            return None
+        try:
+            key = f"task:{task_id}"
+            return await self.get_json(key)
+        except Exception as e:
+            logger.warning(f"获取任务状态失败: {task_id}, error: {e}")
+            return None
 
     async def update_task_progress(
         self,
@@ -181,14 +195,21 @@ class RedisDB:
         Returns:
             是否成功
         """
-        data = await self.get_task_status(task_id)
-        if data:
-            data["meta"]["progress"] = progress
-            if message:
-                data["meta"]["message"] = message
-            key = f"task:{task_id}"
-            return await self.set_json(key, data, expire=86400)
-        return False
+        if not self._connected or not self.client:
+            logger.warning(f"Redis未连接，跳过任务进度更新: {task_id}")
+            return False
+        try:
+            data = await self.get_task_status(task_id)
+            if data:
+                data["meta"]["progress"] = progress
+                if message:
+                    data["meta"]["message"] = message
+                key = f"task:{task_id}"
+                return await self.set_json(key, data, expire=86400)
+            return False
+        except Exception as e:
+            logger.warning(f"更新任务进度失败: {task_id}, error: {e}")
+            return False
 
     # ==================== 缓存操作 ====================
 

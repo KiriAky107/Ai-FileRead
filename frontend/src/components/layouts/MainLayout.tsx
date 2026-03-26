@@ -1,39 +1,29 @@
 import React from 'react';
-import { Link, useLocation, Outlet, useNavigate } from 'react-router-dom';
+import { Link, useLocation, Outlet } from 'react-router-dom';
 import {
   LayoutDashboard,
   FileText,
   TableProperties,
   MessageSquareCode,
-  LogOut,
   Menu,
-  X,
   ChevronRight,
-  User,
-  Sparkles
+  Sparkles,
+  Clock
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
-import { useAuth } from '@/context/AuthContext';
 import { cn } from '@/lib/utils';
 import { Sheet, SheetContent, SheetTrigger } from '@/components/ui/sheet';
 
 const navItems = [
   { name: '控制台', path: '/', icon: LayoutDashboard },
   { name: '文档中心', path: '/documents', icon: FileText },
-  { name: 'Excel 解析', path: '/excel-parse', icon: Sparkles },
   { name: '智能填表', path: '/form-fill', icon: TableProperties },
   { name: '智能助手', path: '/assistant', icon: MessageSquareCode },
+  { name: '任务历史', path: '/task-history', icon: Clock },
 ];
 
 const MainLayout: React.FC = () => {
-  const { user, profile, signOut } = useAuth();
   const location = useLocation();
-  const navigate = useNavigate();
-
-  const handleSignOut = async () => {
-    await signOut();
-    navigate('/login');
-  };
 
   const SidebarContent = () => (
     <div className="flex flex-col h-full bg-sidebar py-6 border-r border-sidebar-border">
@@ -70,25 +60,17 @@ const MainLayout: React.FC = () => {
       </nav>
 
       <div className="px-4 mt-auto">
-        <div className="bg-sidebar-accent/50 rounded-2xl p-4 mb-4 border border-sidebar-border/50">
+        <div className="bg-sidebar-accent/50 rounded-2xl p-4 border border-sidebar-border/50">
           <div className="flex items-center gap-3">
             <div className="w-10 h-10 rounded-full bg-secondary flex items-center justify-center border-2 border-primary/10">
-              <User size={20} className="text-primary" />
+              <Sparkles size={20} className="text-primary" />
             </div>
             <div className="flex flex-col overflow-hidden">
-              <span className="font-semibold text-sm truncate">{((profile as any)?.email) || '用户'}</span>
-              <span className="text-[10px] uppercase tracking-wider text-muted-foreground">{((profile as any)?.role) || 'User'}</span>
+              <span className="font-semibold text-sm truncate">智联文档</span>
+              <span className="text-[10px] uppercase tracking-wider text-muted-foreground">多源数据融合</span>
             </div>
           </div>
         </div>
-        <Button 
-          variant="outline" 
-          className="w-full justify-start gap-3 border-none hover:bg-destructive/10 hover:text-destructive group rounded-xl"
-          onClick={handleSignOut}
-        >
-          <LogOut size={18} className="group-hover:rotate-180 transition-transform duration-300" />
-          <span>退出登录</span>
-        </Button>
       </div>
     </div>
   );
