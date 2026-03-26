@@ -37,7 +37,7 @@ class MySQLDB:
     def __init__(self):
         # 异步引擎 (用于 FastAPI 异步操作)
         self.async_engine = create_async_engine(
-            settings.mysql_url,
+            settings.async_mysql_url,
             echo=settings.DEBUG,  # SQL 日志
             pool_pre_ping=True,   # 连接前检测
             pool_size=10,
@@ -55,7 +55,7 @@ class MySQLDB:
 
         # 同步引擎 (用于 Celery 同步任务)
         self.sync_engine = create_engine(
-            settings.mysql_url.replace("mysql+pymysql", "mysql"),
+            settings.mysql_url,
             echo=settings.DEBUG,
             pool_pre_ping=True,
             pool_size=5,

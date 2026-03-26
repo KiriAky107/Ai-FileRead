@@ -45,9 +45,18 @@ class Settings(BaseSettings):
 
     @property
     def mysql_url(self) -> str:
-        """生成MySQL连接URL"""
+        """生成MySQL连接URL (同步)"""
         return (
             f"mysql+pymysql://{self.MYSQL_USER}:{self.MYSQL_PASSWORD}"
+            f"@{self.MYSQL_HOST}:{self.MYSQL_PORT}/{self.MYSQL_DATABASE}"
+            f"?charset={self.MYSQL_CHARSET}"
+        )
+
+    @property
+    def async_mysql_url(self) -> str:
+        """生成MySQL连接URL (异步)"""
+        return (
+            f"mysql+aiomysql://{self.MYSQL_USER}:{self.MYSQL_PASSWORD}"
             f"@{self.MYSQL_HOST}:{self.MYSQL_PORT}/{self.MYSQL_DATABASE}"
             f"?charset={self.MYSQL_CHARSET}"
         )

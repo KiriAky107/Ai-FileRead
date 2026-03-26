@@ -30,7 +30,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Checkbox } from '@/components/ui/checkbox';
 import { toast } from 'sonner';
 import { cn } from '@/lib/utils';
-import { backendApi, type ExcelParseResult, type ExcelUploadOptions, aiApi, analysisChartsApi } from '@/db/backend-api';
+import { backendApi, type ExcelParseResult, type ExcelUploadOptions, aiApi } from '@/db/backend-api';
 import {
   Table as TableComponent,
   TableBody,
@@ -179,7 +179,7 @@ const ExcelParse: React.FC = () => {
     setAnalysisCharts(null);
 
     try {
-      const result = await analysisChartsApi.extractAndGenerateCharts({
+      const result = await aiApi.extractAndGenerateCharts({
         analysis_text: analysisText,
         original_filename: uploadedFile?.name || 'unknown',
         file_type: 'excel'
