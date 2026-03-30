@@ -126,26 +126,45 @@ class TableRAGService:
         }
 
         try:
-            # 1. 读取 Excel
+            # 1. 先检查 Excel 文件是否有效
+            logger.info(f"正在检查Excel文件: {file_path}")
+            try:
+                xls_file = pd.ExcelFile(file_path)
+                sheet_names = xls_file.sheet_names
+                logger.info(f"Excel文件工作表: {sheet_names}")
+                if not sheet_names:
+                    return {"success": False, "error": "Excel 文件没有工作表"}
+            except Exception as e:
+                logger.error(f"读取Excel文件失败: {file_path}, error: {e}")
+                return {"success": False, "error": f"无法读取Excel文件: {str(e)}"}
+
+            # 2. 读取 Excel
             if sheet_name:
+                # 验证指定的sheet_name是否存在
+                if sheet_name not in sheet_names:
+                    logger.warning(f"指定的工作表 '{sheet_name}' 不存在，使用第一个工作表: {sheet_names[0]}")
+                    sheet_name = sheet_names[0]
                 df = pd.read_excel(file_path, sheet_name=sheet_name, header=header_row)
             else:
                 df = pd.read_excel(file_path, header=header_row)
+
+            logger.info(f"读取到数据: {len(df)} 行, {len(df.columns)} 列")
 
             if df.empty:
                 return {"success": False, "error": "Excel 文件为空"}
 
             # 清理列名
             df.columns = [str(c) for c in df.columns]
-            table_name = excel_storage._sanitize_table_name(filename)
+            table_name = self.excel_storage._sanitize_table_name(filename)
             results["table_name"] = table_name
             results["field_count"] = len(df.columns)
+            logger.info(f"表名: {table_name}, 字段数: {len(df.columns)}")
 
-            # 2. 初始化 RAG (如果需要)
+            # 3. 初始化 RAG (如果需要)
             if not self.rag._initialized:
                 self.rag._init_vector_store()
 
-            # 3. 为每个字段生成描述并索引
+            # 4. 为每个字段生成描述并索引
             all_fields_data = {}
             for col in df.columns:
                 # 采样示例值
@@ -187,7 +206,8 @@ class TableRAGService:
                     logger.error(error_msg)
                     results["errors"].append(error_msg)
 
-            # 4. 存储到 MySQL
+            # 5. 存储到 MySQL
+            logger.info(f"开始存储到MySQL: {filename}")
             store_result = await self.excel_storage.store_excel(
                 file_path=file_path,
                 filename=filename,

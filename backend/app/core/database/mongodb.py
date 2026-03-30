@@ -87,8 +87,10 @@ class MongoDB:
             "updated_at": datetime.utcnow(),
         }
         result = await self.documents.insert_one(document)
-        logger.info(f"文档已插入MongoDB: {result.inserted_id}")
-        return str(result.inserted_id)
+        doc_id = str(result.inserted_id)
+        filename = metadata.get("original_filename", "unknown")
+        logger.info(f"✓ 文档已存入MongoDB: [{doc_type}] {filename} | ID: {doc_id}")
+        return doc_id
 
     async def get_document(self, doc_id: str) -> Optional[Dict[str, Any]]:
         """根据ID获取文档"""

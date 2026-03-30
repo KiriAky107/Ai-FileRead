@@ -10,6 +10,7 @@ import io
 
 from app.services.file_service import file_service
 from app.core.document_parser import XlsxParser
+from app.services.table_rag_service import table_rag_service
 
 logger = logging.getLogger(__name__)
 
@@ -27,7 +28,7 @@ async def upload_excel(
     header_row: int = Query(0, description="表头所在的行索引")
 ):
     """
-    上传并解析 Excel 文件
+    上传并解析 Excel 文件，同时存储到 MySQL 数据库
 
     Args:
         file: 上传的 Excel 文件
@@ -76,6 +77,23 @@ async def upload_excel(
         if result.metadata:
             result.metadata['saved_path'] = saved_path
             result.metadata['original_filename'] = file.filename
+
+        # 存储到 MySQL 数据库
+        try:
+            store_result = await table_rag_service.build_table_rag_index(
+                file_path=saved_path,
+                filename=file.filename,
+                sheet_name=sheet_name if sheet_name else None,
+                header_row=header_row
+            )
+            if store_result.get("success"):
+                result.metadata['mysql_table'] = store_result.get('table_name')
+                result.metadata['row_count'] = store_result.get('row_count')
+                logger.info(f"Excel已存储到MySQL: {file.filename}, 表: {store_result.get('table_name')}")
+            else:
+                logger.warning(f"Excel存储到MySQL失败: {store_result.get('error')}")
+        except Exception as e:
+            logger.error(f"Excel存储到MySQL异常: {str(e)}", exc_info=True)
 
         return result.to_dict()
 

@@ -23,6 +23,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database.mysql import Base, mysql_db
 
 logger = logging.getLogger(__name__)
+# 设置该模块的日志级别
+logger.setLevel(logging.DEBUG)
 
 
 class ExcelStorageService:
@@ -174,11 +176,14 @@ class ExcelStorageService:
         }
 
         try:
+            logger.info(f"开始读取Excel文件: {file_path}")
             # 读取 Excel
             if sheet_name:
                 df = pd.read_excel(file_path, sheet_name=sheet_name, header=header_row)
             else:
                 df = pd.read_excel(file_path, header=header_row)
+
+            logger.info(f"Excel读取完成，行数: {len(df)}, 列数: {len(df.columns)}")
 
             if df.empty:
                 return {"success": False, "error": "Excel 文件为空"}
@@ -202,8 +207,10 @@ class ExcelStorageService:
             model_class = self._create_table_model(table_name, df.columns, column_types)
 
             # 创建表结构
+            logger.info(f"正在创建MySQL表: {table_name}")
             async with self.mysql_db.get_session() as session:
                 model_class.__table__.create(session.bind, checkfirst=True)
+            logger.info(f"MySQL表创建完成: {table_name}")
 
             # 插入数据
             records = []
@@ -231,11 +238,13 @@ class ExcelStorageService:
 
                 records.append(record)
 
+            logger.info(f"正在插入 {len(records)} 条数据到 MySQL...")
             # 批量插入
             async with self.mysql_db.get_session() as session:
                 for record in records:
                     session.add(model_class(**record))
                 await session.commit()
+            logger.info(f"数据插入完成: {len(records)} 条")
 
             results["row_count"] = len(records)
             logger.info(f"Excel 数据已存储到 MySQL 表 {table_name}，共 {len(records)} 行")
@@ -243,7 +252,7 @@ class ExcelStorageService:
             return results
 
         except Exception as e:
-            logger.error(f"存储 Excel 到 MySQL 失败: {str(e)}")
+            logger.error(f"存储 Excel 到 MySQL 失败: {str(e)}", exc_info=True)
             return {"success": False, "error": str(e)}
 
     async def store_structured_data(

@@ -196,18 +196,22 @@ async def process_document(
                 meta={"progress": 50, "message": "正在存储到MySQL并生成字段描述"}
             )
 
-            # 使用 TableRAG 服务完成建表和RAG索引
-            rag_result = await table_rag_service.build_table_rag_index(
-                file_path=file_path,
-                filename=original_filename,
-                sheet_name=parse_options.get("sheet_name"),
-                header_row=parse_options.get("header_row", 0)
-            )
+            try:
+                # 使用 TableRAG 服务完成建表和RAG索引
+                logger.info(f"开始存储Excel到MySQL: {original_filename}, file_path: {file_path}")
+                rag_result = await table_rag_service.build_table_rag_index(
+                    file_path=file_path,
+                    filename=original_filename,
+                    sheet_name=parse_options.get("sheet_name"),
+                    header_row=parse_options.get("header_row", 0)
+                )
 
-            if rag_result.get("success"):
-                logger.info(f"RAG索引构建成功: {original_filename}")
-            else:
-                logger.warning(f"RAG索引构建失败: {rag_result.get('error')}")
+                if rag_result.get("success"):
+                    logger.info(f"Excel存储到MySQL成功: {original_filename}, table: {rag_result.get('table_name')}")
+                else:
+                    logger.error(f"RAG索引构建失败: {rag_result.get('error')}")
+            except Exception as e:
+                logger.error(f"Excel存储到MySQL异常: {str(e)}", exc_info=True)
 
         else:
             # 非结构化文档
