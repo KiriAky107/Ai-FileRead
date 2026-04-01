@@ -203,13 +203,19 @@ class ExcelStorageService:
                     "type": col_type
                 })
 
-            # 创建表
-            model_class = self._create_table_model(table_name, df.columns, column_types)
-
-            # 创建表结构
+            # 创建表 - 使用原始 SQL 以兼容异步
             logger.info(f"正在创建MySQL表: {table_name}")
-            async with self.mysql_db.get_session() as session:
-                model_class.__table__.create(session.bind, checkfirst=True)
+            from sqlalchemy import text
+            sql_columns = ["id INT AUTO_INCREMENT PRIMARY KEY"]
+            for col in df.columns:
+                col_name = self._sanitize_column_name(col)
+                col_type = column_types.get(col, "TEXT")
+                sql_type = "INT" if col_type == "INTEGER" else "FLOAT" if col_type == "FLOAT" else "DATETIME" if col_type == "DATETIME" else "TEXT"
+                sql_columns.append(f"`{col_name}` {sql_type}")
+            sql_columns.append("created_at DATETIME DEFAULT CURRENT_TIMESTAMP")
+            sql_columns.append("updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP")
+            create_sql = text(f"CREATE TABLE IF NOT EXISTS `{table_name}` ({', '.join(sql_columns)})")
+            await self.mysql_db.execute_raw_sql(str(create_sql))
             logger.info(f"MySQL表创建完成: {table_name}")
 
             # 插入数据

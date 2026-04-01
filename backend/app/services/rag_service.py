@@ -40,9 +40,17 @@ class RAGService:
     def _init_embeddings(self):
         """初始化嵌入模型"""
         if self.embedding_model is None:
-            self.embedding_model = SentenceTransformer(settings.EMBEDDING_MODEL)
-            self._dimension = self.embedding_model.get_sentence_embedding_dimension()
-            logger.info(f"RAG 嵌入模型初始化完成: {settings.EMBEDDING_MODEL}, 维度: {self._dimension}")
+            model_name = getattr(settings, 'EMBEDDING_MODEL', 'all-MiniLM-L6-v2')
+            try:
+                self.embedding_model = SentenceTransformer(model_name)
+                self._dimension = self.embedding_model.get_sentence_embedding_dimension()
+                logger.info(f"RAG 嵌入模型初始化完成: {model_name}, 维度: {self._dimension}")
+            except Exception as e:
+                logger.warning(f"嵌入模型 {model_name} 加载失败，使用默认模型: {e}")
+                # 使用轻量级默认模型
+                self.embedding_model = SentenceTransformer('all-MiniLM-L6-v2')
+                self._dimension = self.embedding_model.get_sentence_embedding_dimension()
+                logger.info(f"RAG 嵌入模型使用默认: all-MiniLM-L6-v2, 维度: {self._dimension}")
 
     def _init_vector_store(self):
         """初始化向量存储"""

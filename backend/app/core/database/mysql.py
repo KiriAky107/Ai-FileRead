@@ -72,6 +72,26 @@ class MySQLDB:
     async def init_db(self):
         """初始化数据库，创建所有表"""
         try:
+            # 先创建数据库（如果不存在）
+            from sqlalchemy import text
+            db_name = settings.MYSQL_DATABASE
+            # 连接时不指定数据库来创建数据库
+            temp_url = (
+                f"mysql+aiomysql://{settings.MYSQL_USER}:{settings.MYSQL_PASSWORD}"
+                f"@{settings.MYSQL_HOST}:{settings.MYSQL_PORT}/"
+                f"?charset={settings.MYSQL_CHARSET}"
+            )
+            from sqlalchemy.ext.asyncio import create_async_engine
+            temp_engine = create_async_engine(temp_url, echo=False)
+            try:
+                async with temp_engine.connect() as conn:
+                    await conn.execute(text(f"CREATE DATABASE IF NOT EXISTS `{db_name}` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci"))
+                    await conn.commit()
+                logger.info(f"MySQL 数据库 {db_name} 创建或已存在")
+            finally:
+                await temp_engine.dispose()
+
+            # 然后创建表
             async with self.async_engine.begin() as conn:
                 await conn.run_sync(Base.metadata.create_all)
             logger.info("MySQL 数据库表初始化完成")
