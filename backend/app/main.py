@@ -2,6 +2,7 @@
 FastAPI 应用主入口
 """
 import logging
+import logging.handlers
 import sys
 import uuid
 from contextlib import asynccontextmanager
@@ -20,8 +21,19 @@ from app.core.database import mysql_db, mongodb, redis_db
 
 def setup_logging():
     """配置应用日志系统"""
+    import os
+    from pathlib import Path
+
     # 根日志配置
     log_level = logging.DEBUG if settings.DEBUG else logging.INFO
+
+    # 日志目录
+    log_dir = Path("data/logs")
+    log_dir.mkdir(parents=True, exist_ok=True)
+
+    # 日志文件路径
+    log_file = log_dir / "app.log"
+    error_log_file = log_dir / "error.log"
 
     # 控制台处理器
     console_handler = logging.StreamHandler(sys.stdout)
@@ -32,15 +44,44 @@ def setup_logging():
     )
     console_handler.setFormatter(console_formatter)
 
+    # 文件处理器 (所有日志)
+    file_handler = logging.handlers.RotatingFileHandler(
+        log_file,
+        maxBytes=10 * 1024 * 1024,  # 10MB
+        backupCount=5,
+        encoding="utf-8"
+    )
+    file_handler.setLevel(logging.DEBUG)
+    file_formatter = logging.Formatter(
+        fmt="%(asctime)s | %(levelname)-8s | %(name)s:%(lineno)d | %(funcName)s | %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S"
+    )
+    file_handler.setFormatter(file_formatter)
+
+    # 错误日志处理器 (仅ERROR及以上)
+    error_file_handler = logging.handlers.RotatingFileHandler(
+        error_log_file,
+        maxBytes=10 * 1024 * 1024,  # 10MB
+        backupCount=5,
+        encoding="utf-8"
+    )
+    error_file_handler.setLevel(logging.ERROR)
+    error_file_handler.setFormatter(file_formatter)
+
     # 根日志器
     root_logger = logging.getLogger()
-    root_logger.setLevel(log_level)
+    root_logger.setLevel(logging.DEBUG)
     root_logger.handlers = []
     root_logger.addHandler(console_handler)
+    root_logger.addHandler(file_handler)
+    root_logger.addHandler(error_file_handler)
 
     # 第三方库日志级别
     for lib in ["uvicorn", "uvicorn.access", "fastapi", "httpx", "sqlalchemy"]:
         logging.getLogger(lib).setLevel(logging.WARNING)
+
+    root_logger.info(f"日志系统初始化完成 | 日志目录: {log_dir}")
+    root_logger.info(f"主日志文件: {log_file} | 错误日志: {error_log_file}")
 
     return root_logger
 
