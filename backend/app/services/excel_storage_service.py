@@ -17,6 +17,7 @@ from sqlalchemy import (
     String,
     Text,
     inspect,
+    text,
 )
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -66,15 +67,41 @@ class ExcelStorageService:
         Returns:
             合法的字段名
         """
-        # 只保留字母、数字、下划线
-        name = re.sub(r'[^a-zA-Z0-9_]', '_', str(col_name))
-
-        # 确保以字母开头
+        # MySQL 支持 UTF8 编码，中文字符可以直接使用
+        # 只处理非法字符（控制字符等）和首字符数字
+        name = str(col_name).strip()
+        # 移除控制字符
+        name = re.sub(r'[\x00-\x1f\x7f]', '', name)
+        # 确保以字母或中文开头
         if name and name[0].isdigit():
             name = 'col_' + name
+        # 限制长度 (MySQL 字段名最多64字符)
+        return name[:64]
 
-        # 限制长度
-        return name[:50]
+    def _get_unique_column_name(self, col_name: str, used_names: set) -> str:
+        """
+        获取唯一的列名，避免重复
+
+        Args:
+            col_name: 原始列名
+            used_names: 已使用的列名集合
+
+        Returns:
+            唯一的列名
+        """
+        sanitized = self._sanitize_column_name(col_name)
+        if sanitized not in used_names:
+            used_names.add(sanitized)
+            return sanitized
+
+        # 添加数字后缀直到唯一
+        base = sanitized if sanitized else "col"
+        counter = 1
+        while f"{base}_{counter}" in used_names:
+            counter += 1
+        unique_name = f"{base}_{counter}"
+        used_names.add(unique_name)
+        return unique_name
 
     def _infer_column_type(self, series: pd.Series) -> str:
         """
@@ -191,12 +218,15 @@ class ExcelStorageService:
             # 清理列名
             df.columns = [str(c) for c in df.columns]
 
-            # 推断列类型
+            # 推断列类型，并生成唯一的列名
             column_types = {}
+            column_name_map = {}  # 原始列名 -> 唯一合法列名
+            used_names = set()
             for col in df.columns:
-                col_name = self._sanitize_column_name(col)
+                col_name = self._get_unique_column_name(col, used_names)
                 col_type = self._infer_column_type(df[col])
                 column_types[col] = col_type
+                column_name_map[col] = col_name
                 results["columns"].append({
                     "original_name": col,
                     "sanitized_name": col_name,
@@ -205,10 +235,9 @@ class ExcelStorageService:
 
             # 创建表 - 使用原始 SQL 以兼容异步
             logger.info(f"正在创建MySQL表: {table_name}")
-            from sqlalchemy import text
             sql_columns = ["id INT AUTO_INCREMENT PRIMARY KEY"]
             for col in df.columns:
-                col_name = self._sanitize_column_name(col)
+                col_name = column_name_map[col]
                 col_type = column_types.get(col, "TEXT")
                 sql_type = "INT" if col_type == "INTEGER" else "FLOAT" if col_type == "FLOAT" else "DATETIME" if col_type == "DATETIME" else "TEXT"
                 sql_columns.append(f"`{col_name}` {sql_type}")
@@ -223,7 +252,7 @@ class ExcelStorageService:
             for _, row in df.iterrows():
                 record = {}
                 for col in df.columns:
-                    col_name = self._sanitize_column_name(col)
+                    col_name = column_name_map[col]
                     value = row[col]
 
                     # 处理 NaN 值
@@ -244,13 +273,33 @@ class ExcelStorageService:
 
                 records.append(record)
 
-            logger.info(f"正在插入 {len(records)} 条数据到 MySQL...")
-            # 批量插入
-            async with self.mysql_db.get_session() as session:
-                for record in records:
-                    session.add(model_class(**record))
-                await session.commit()
-            logger.info(f"数据插入完成: {len(records)} 条")
+            logger.info(f"正在插入 {len(records)} 条数据到 MySQL (使用批量插入)...")
+            # 使用 pymysql 直接插入以避免 SQLAlchemy 异步问题
+            import pymysql
+            from app.config import settings
+
+            connection = pymysql.connect(
+                host=settings.MYSQL_HOST,
+                port=settings.MYSQL_PORT,
+                user=settings.MYSQL_USER,
+                password=settings.MYSQL_PASSWORD,
+                database=settings.MYSQL_DATABASE,
+                charset=settings.MYSQL_CHARSET
+            )
+            try:
+                columns_str = ', '.join(['`' + column_name_map[col] + '`' for col in df.columns])
+                placeholders = ', '.join(['%s' for _ in df.columns])
+                insert_sql = f"INSERT INTO `{table_name}` ({columns_str}) VALUES ({placeholders})"
+
+                # 转换为元组列表 (使用映射后的列名)
+                param_list = [tuple(record.get(column_name_map[col]) for col in df.columns) for record in records]
+
+                with connection.cursor() as cursor:
+                    cursor.executemany(insert_sql, param_list)
+                    connection.commit()
+                logger.info(f"数据插入完成: {len(records)} 条")
+            finally:
+                connection.close()
 
             results["row_count"] = len(records)
             logger.info(f"Excel 数据已存储到 MySQL 表 {table_name}，共 {len(records)} 行")
