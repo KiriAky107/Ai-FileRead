@@ -113,12 +113,35 @@ class ExcelStorageService:
         Returns:
             类型名称
         """
+        # 移除空值进行类型检查
+        non_null = series.dropna()
+        if len(non_null) == 0:
+            return "TEXT"
+
         dtype = series.dtype
 
+        # 整数类型检查
         if pd.api.types.is_integer_dtype(dtype):
-            return "INTEGER"
+            # 检查是否所有值都能放入 INT 范围
+            try:
+                int_values = non_null.astype('int64')
+                if int_values.min() >= -2147483648 and int_values.max() <= 2147483647:
+                    return "INTEGER"
+                else:
+                    # 超出 INT 范围，使用 TEXT
+                    return "TEXT"
+            except (ValueError, OverflowError):
+                return "TEXT"
         elif pd.api.types.is_float_dtype(dtype):
-            return "FLOAT"
+            # 检查是否所有值都能放入 FLOAT
+            try:
+                float_values = non_null.astype('float64')
+                if float_values.min() >= -1e308 and float_values.max() <= 1e308:
+                    return "FLOAT"
+                else:
+                    return "TEXT"
+            except (ValueError, OverflowError):
+                return "TEXT"
         elif pd.api.types.is_datetime64_any_dtype(dtype):
             return "DATETIME"
         elif pd.api.types.is_bool_dtype(dtype):
