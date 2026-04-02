@@ -34,6 +34,123 @@ class ExcelStorageService:
     def __init__(self):
         self.mysql_db = mysql_db
 
+    def _extract_sheet_names_from_xml(self, file_path: str) -> list:
+        """从 Excel 文件的 XML 中提取工作表名称"""
+        import zipfile
+        from xml.etree import ElementTree as ET
+
+        try:
+            with zipfile.ZipFile(file_path, 'r') as z:
+                if 'xl/workbook.xml' not in z.namelist():
+                    return []
+                content = z.read('xl/workbook.xml')
+                root = ET.fromstring(content)
+                ns = {'main': 'http://purl.oclc.org/ooxml/spreadsheetml/main'}
+                sheets = root.findall('.//main:sheet', ns)
+                return [s.get('name') for s in sheets if s.get('name')]
+        except Exception:
+            return []
+
+    def _read_excel_sheet(self, file_path: str, sheet_name: str = None, header_row: int = 0) -> pd.DataFrame:
+        """读取 Excel 工作表，支持 pandas 无法解析的特殊 Excel 文件"""
+        import zipfile
+        from xml.etree import ElementTree as ET
+
+        try:
+            df = pd.read_excel(file_path, sheet_name=sheet_name, header=header_row)
+            if df is not None and not df.empty:
+                return df
+        except Exception:
+            pass
+
+        # pandas 读取失败，从 XML 直接解析
+        logger.info(f"使用 XML 方式读取 Excel: {file_path}")
+
+        try:
+            with zipfile.ZipFile(file_path, 'r') as z:
+                sheet_names = self._extract_sheet_names_from_xml(file_path)
+                if not sheet_names:
+                    raise ValueError("无法从 Excel 文件中找到工作表")
+
+                target_sheet = sheet_name if sheet_name and sheet_name in sheet_names else sheet_names[0]
+                sheet_index = sheet_names.index(target_sheet) + 1
+
+                shared_strings = []
+                if 'xl/sharedStrings.xml' in z.namelist():
+                    ss_content = z.read('xl/sharedStrings.xml')
+                    ss_root = ET.fromstring(ss_content)
+                    ns = {'main': 'http://purl.oclc.org/ooxml/spreadsheetml/main'}
+                    for si in ss_root.findall('.//main:si', ns):
+                        t = si.find('.//main:t', ns)
+                        shared_strings.append(t.text if t is not None else '')
+
+                sheet_file = f'xl/worksheets/sheet{sheet_index}.xml'
+                sheet_content = z.read(sheet_file)
+                root = ET.fromstring(sheet_content)
+                ns = {'main': 'http://purl.oclc.org/ooxml/spreadsheetml/main'}
+
+                rows_data = []
+                for row in root.findall('.//main:row', ns):
+                    row_idx = int(row.get('r', 0))
+                    if row_idx <= header_row + 1:
+                        continue
+
+                    row_cells = {}
+                    for cell in row.findall('main:c', ns):
+                        cell_ref = cell.get('r', '')
+                        col_letters = ''.join(filter(str.isalpha, cell_ref))
+                        cell_type = cell.get('t', 'n')
+                        v = cell.find('main:v', ns)
+
+                        if v is not None and v.text:
+                            if cell_type == 's':
+                                try:
+                                    val = shared_strings[int(v.text)]
+                                except (ValueError, IndexError):
+                                    val = v.text
+                            elif cell_type == 'b':
+                                val = v.text == '1'
+                            else:
+                                val = v.text
+                        else:
+                            val = None
+                        row_cells[col_letters] = val
+
+                    if row_cells:
+                        rows_data.append(row_cells)
+
+                if not rows_data:
+                    return pd.DataFrame()
+
+                df = pd.DataFrame(rows_data)
+
+                if header_row >= 0:
+                    first_row_sheet = f'xl/worksheets/sheet{sheet_index}.xml'
+                    sheet_content = z.read(first_row_sheet)
+                    root = ET.fromstring(sheet_content)
+                    first_row = root.find(f'.//main:row[@r="{header_row + 1}"]', ns)
+                    if first_row is not None:
+                        headers = {}
+                        for cell in first_row.findall('main:c', ns):
+                            cell_ref = cell.get('r', '')
+                            col_letters = ''.join(filter(str.isalpha, cell_ref))
+                            cell_type = cell.get('t', 'n')
+                            v = cell.find('main:v', ns)
+                            if v is not None and v.text:
+                                if cell_type == 's':
+                                    try:
+                                        headers[col_letters] = shared_strings[int(v.text)]
+                                    except (ValueError, IndexError):
+                                        headers[col_letters] = v.text
+                                else:
+                                    headers[col_letters] = v.text
+                        df.columns = [headers.get(col, col) for col in df.columns]
+
+                return df
+        except Exception as e:
+            logger.error(f"XML 解析 Excel 失败: {e}")
+            raise
+
     def _sanitize_table_name(self, filename: str) -> str:
         """
         将文件名转换为合法的表名
@@ -227,11 +344,8 @@ class ExcelStorageService:
 
         try:
             logger.info(f"开始读取Excel文件: {file_path}")
-            # 读取 Excel
-            if sheet_name:
-                df = pd.read_excel(file_path, sheet_name=sheet_name, header=header_row)
-            else:
-                df = pd.read_excel(file_path, header=header_row)
+            # 读取 Excel（使用 fallback 方式支持特殊格式文件）
+            df = self._read_excel_sheet(file_path, sheet_name=sheet_name, header_row=header_row)
 
             logger.info(f"Excel读取完成，行数: {len(df)}, 列数: {len(df.columns)}")
 

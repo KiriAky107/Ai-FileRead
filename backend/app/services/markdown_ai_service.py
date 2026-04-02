@@ -48,8 +48,8 @@ class MarkdownAIService:
     # 中文章节编号模式
     CHINESE_NUMBERS = ["一", "二", "三", "四", "五", "六", "七", "八", "九", "十"]
     CHINESE_SUFFIX = "、"
-    PARENTHESIS_PATTERN = re.compile(r'^（([一二三四五六七八九十]+)）\s*(.+)$')
-    CHINESE_SECTION_PATTERN = re.compile(r'^([一二三四五六七八九十]+）、\s*(.+)$')
+    PARENTHESIS_PATTERN = re.compile(r'^（([一二三四五六七八九十]+)\s*(.+)$')
+    CHINESE_SECTION_PATTERN = re.compile(r'^([一二三四五六七八九十]+)、\s*(.+)$')
     ARABIC_SECTION_PATTERN = re.compile(r'^(\d+)\.\s+(.+)$')
 
     def __init__(self):
