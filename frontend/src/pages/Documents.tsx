@@ -84,7 +84,7 @@ const Documents: React.FC = () => {
 
   // Markdown AI 分析相关状态
   const [mdAnalysis, setMdAnalysis] = useState<AIMarkdownAnalyzeResult | null>(null);
-  const [mdAnalysisType, setMdAnalysisType] = useState<'summary' | 'outline' | 'key_points' | 'questions' | 'tags' | 'qa' | 'statistics' | 'section'>('summary');
+  const [mdAnalysisType, setMdAnalysisType] = useState<'summary' | 'outline' | 'key_points' | 'questions' | 'tags' | 'qa' | 'statistics' | 'section' | 'charts'>('summary');
   const [mdUserPrompt, setMdUserPrompt] = useState('');
   const [mdSections, setMdSections] = useState<MarkdownSection[]>([]);
   const [mdSelectedSection, setMdSelectedSection] = useState<string>('');
@@ -517,6 +517,7 @@ const Documents: React.FC = () => {
       case 'questions': return <MessageSquareCode size={20} />;
       case 'tags': return <Tag size={20} />;
       case 'qa': return <HelpCircle size={20} />;
+      case 'charts': return <TrendingUp size={20} />;
       default: return <Sparkles size={20} />;
     }
   };
@@ -762,7 +763,8 @@ const Documents: React.FC = () => {
                         { value: 'section', label: '章节分析', desc: '分章节详细分析' },
                         { value: 'questions', label: '生成问题', desc: '生成理解性问题' },
                         { value: 'tags', label: '生成标签', desc: '提取主题标签' },
-                        { value: 'qa', label: '问答对', desc: '生成问答内容' }
+                        { value: 'qa', label: '问答对', desc: '生成问答内容' },
+                        { value: 'charts', label: '数据图表', desc: '生成可视化数据' }
                       ].map(type => (
                         <SelectItem key={type.value} value={type.value}>
                           <div className="flex items-center gap-2">

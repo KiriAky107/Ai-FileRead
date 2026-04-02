@@ -207,6 +207,9 @@ class ExcelStorageService:
             唯一的列名
         """
         sanitized = self._sanitize_column_name(col_name)
+        # "id" 是 MySQL 保留名，作为主键使用
+        if sanitized.lower() == "id":
+            sanitized = "col_id"
         if sanitized not in used_names:
             used_names.add(sanitized)
             return sanitized

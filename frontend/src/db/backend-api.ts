@@ -182,6 +182,29 @@ export interface AIMarkdownAnalyzeResult {
   };
   sections?: MarkdownSection[];
   analysis?: string;
+  chart_data?: {
+    tables?: Array<{
+      description?: string;
+      columns?: string[];
+      rows?: string[][];
+      visualization?: {
+        statistics?: any;
+        charts?: any;
+        distributions?: any;
+      };
+    }>;
+    key_statistics?: Array<{
+      name?: string;
+      value?: string;
+      trend?: string;
+      description?: string;
+    }>;
+    chart_suggestions?: Array<{
+      chart_type?: string;
+      title?: string;
+      data_source?: string;
+    }>;
+  };
   error?: string;
 }
 
@@ -201,7 +224,7 @@ export interface MarkdownOutlineResult {
   error?: string;
 }
 
-export type MarkdownAnalysisType = 'summary' | 'outline' | 'key_points' | 'questions' | 'tags' | 'qa' | 'statistics' | 'section';
+export type MarkdownAnalysisType = 'summary' | 'outline' | 'key_points' | 'questions' | 'tags' | 'qa' | 'statistics' | 'section' | 'charts';
 
 export interface AIExcelAnalyzeResult {
   success: boolean;

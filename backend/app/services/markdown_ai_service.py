@@ -6,6 +6,7 @@ Markdown 文档 AI 分析服务
 - 结构化数据提取
 - 流式输出
 - 多种分析类型
+- 可视化图表生成
 """
 import asyncio
 import json
@@ -15,6 +16,7 @@ from typing import Any, AsyncGenerator, Dict, List, Optional
 
 from app.services.llm_service import llm_service
 from app.core.document_parser import MarkdownParser
+from app.services.visualization_service import visualization_service
 
 logger = logging.getLogger(__name__)
 
@@ -59,13 +61,14 @@ class MarkdownAIService:
         """获取支持的分析类型"""
         return [
             "summary",      # 文档摘要
-            "outline",     # 大纲提取
+            "outline",      # 大纲提取
             "key_points",   # 关键点提取
             "questions",    # 生成问题
             "tags",         # 生成标签
             "qa",           # 问答对
             "statistics",   # 统计数据分析（适合政府公报）
-            "section"       # 分章节详细分析
+            "section",      # 分章节详细分析
+            "charts"        # 可视化图表生成
         ]
 
     def extract_sections(self, content: str, titles: List[Dict]) -> List[MarkdownSection]:
@@ -255,7 +258,8 @@ class MarkdownAIService:
 
             analysis = llm_service.extract_message_content(response)
 
-            return {
+            # 构建基础返回
+            result = {
                 "success": True,
                 "filename": parse_result.metadata.get("filename", ""),
                 "analysis_type": analysis_type,
@@ -270,6 +274,34 @@ class MarkdownAIService:
                 "sections": [s.to_dict() for s in sections[:10]],  # 最多返回10个一级章节
                 "analysis": analysis
             }
+
+            # 如果是 charts 类型，额外生成可视化
+            if analysis_type == "charts":
+                try:
+                    # 解析 LLM 返回的 JSON 数据
+                    chart_data = self._parse_chart_json(analysis)
+                    if chart_data and chart_data.get("tables"):
+                        # 使用可视化服务生成图表
+                        for table_info in chart_data.get("tables", []):
+                            columns = table_info.get("columns", [])
+                            rows = table_info.get("rows", [])
+                            if columns and rows:
+                                vis_result = visualization_service.analyze_and_visualize({
+                                    "columns": columns,
+                                    "rows": [dict(zip(columns, row)) for row in rows]
+                                })
+                                if vis_result.get("success"):
+                                    table_info["visualization"] = {
+                                        "statistics": vis_result.get("statistics"),
+                                        "charts": vis_result.get("charts"),
+                                        "distributions": vis_result.get("distributions")
+                                    }
+                    result["chart_data"] = chart_data
+                except Exception as e:
+                    logger.warning(f"生成可视化图表失败: {e}")
+                    result["chart_data"] = {"tables": [], "key_statistics": [], "chart_suggestions": []}
+
+            return result
 
         except Exception as e:
             logger.error(f"Markdown AI 分析失败: {str(e)}")
@@ -362,6 +394,46 @@ class MarkdownAIService:
                 return found
         return None
 
+    def _parse_chart_json(self, json_str: str) -> Optional[Dict[str, Any]]:
+        """
+        解析 LLM 返回的 JSON 字符串
+
+        Args:
+            json_str: LLM 返回的 JSON 字符串
+
+        Returns:
+            解析后的字典，如果解析失败返回 None
+        """
+        if not json_str:
+            return None
+
+        try:
+            # 尝试直接解析
+            return json.loads(json_str)
+        except json.JSONDecodeError:
+            pass
+
+        # 尝试提取 JSON 代码块
+        import re
+        # 匹配 ```json ... ``` 格式
+        match = re.search(r'```(?:json)?\s*([\s\S]*?)\s*```', json_str)
+        if match:
+            try:
+                return json.loads(match.group(1))
+            except json.JSONDecodeError:
+                pass
+
+        # 尝试找到 JSON 对象的开始和结束
+        start = json_str.find('{')
+        end = json_str.rfind('}')
+        if start != -1 and end != -1 and end > start:
+            try:
+                return json.loads(json_str[start:end+1])
+            except json.JSONDecodeError:
+                pass
+
+        return None
+
     def _get_system_prompt(self, analysis_type: str) -> str:
         """根据分析类型获取系统提示词"""
         prompts = {
@@ -372,7 +444,8 @@ class MarkdownAIService:
             "tags": "你是一个专业的标签生成助手，擅长提取文档的主题标签。",
             "qa": "你是一个专业的问答助手，擅长基于文档内容生成问答对。",
             "statistics": "你是一个专业的统计数据分析助手，擅长分析政府统计公报中的数据。",
-            "section": "你是一个专业的章节分析助手，擅长对文档的特定章节进行深入分析。"
+            "section": "你是一个专业的章节分析助手，擅长对文档的特定章节进行深入分析。",
+            "charts": "你是一个专业的数据可视化助手，擅长从文档中提取数据并生成适合制作图表的数据结构。"
         }
         return prompts.get(analysis_type, "你是一个专业的文档分析助手。")
 
@@ -503,7 +576,50 @@ A2: 回答
 3. 与其他部分的关联（如有）
 4. 重要结论
 
-请用中文回答，分析深入。"""
+请用中文回答，分析深入。""",
+
+            "charts": f"""请从以下文档中提取可用于可视化的数据，并生成适合制作图表的数据结构：
+
+文档标题：{title}
+
+文档内容：
+{content}
+
+请完成以下任务：
+1. 识别文档中的表格数据（Markdown表格格式）
+2. 识别文档中的关键统计数据（百分比、数量、趋势等）
+3. 识别可用于比较的分类数据
+
+请用 JSON 格式返回以下结构的数据（如果没有表格数据，返回空结构）：
+{{
+  "tables": [
+    {{
+      "description": "表格的描述",
+      "columns": ["列名1", "列名2", ...],
+      "rows": [
+        ["值1", "值2", ...],
+        ["值1", "值2", ...]
+      ]
+    }}
+  ],
+  "key_statistics": [
+    {{
+      "name": "指标名称",
+      "value": "数值",
+      "trend": "增长/下降/持平",
+      "description": "指标说明"
+    }}
+  ],
+  "chart_suggestions": [
+    {{
+      "chart_type": "bar/line/pie",
+      "title": "图表标题",
+      "data_source": "数据来源说明"
+    }}
+  ]
+}}
+
+请确保返回的是合法的 JSON 格式。"""
         }
 
         prompt = base_prompts.get(analysis_type, base_prompts["summary"])
