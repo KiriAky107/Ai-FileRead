@@ -166,6 +166,43 @@ export interface AIAnalysisResult {
   error?: string;
 }
 
+// ==================== Markdown AI 分析类型 ====================
+
+export interface AIMarkdownAnalyzeResult {
+  success: boolean;
+  filename?: string;
+  analysis_type?: string;
+  section?: string;
+  word_count?: number;
+  structure?: {
+    title_count?: number;
+    code_block_count?: number;
+    table_count?: number;
+    section_count?: number;
+  };
+  sections?: MarkdownSection[];
+  analysis?: string;
+  error?: string;
+}
+
+export interface MarkdownSection {
+  number: string;
+  title: string;
+  level: number;
+  content_preview?: string;
+  line_start: number;
+  line_end?: number;
+  subsections?: MarkdownSection[];
+}
+
+export interface MarkdownOutlineResult {
+  success: boolean;
+  outline?: MarkdownSection[];
+  error?: string;
+}
+
+export type MarkdownAnalysisType = 'summary' | 'outline' | 'key_points' | 'questions' | 'tags' | 'qa' | 'statistics' | 'section';
+
 export interface AIExcelAnalyzeResult {
   success: boolean;
   excel?: {
@@ -838,6 +875,159 @@ export const aiApi = {
       return await response.json();
     } catch (error) {
       console.error('获取分析类型失败:', error);
+      throw error;
+    }
+  },
+
+  /**
+   * 上传并使用 AI 分析 Markdown 文件
+   */
+  async analyzeMarkdown(
+    file: File,
+    options: {
+      analysisType?: MarkdownAnalysisType;
+      userPrompt?: string;
+      sectionNumber?: string;
+    } = {}
+  ): Promise<AIMarkdownAnalyzeResult> {
+    const formData = new FormData();
+    formData.append('file', file);
+
+    const params = new URLSearchParams();
+    if (options.analysisType) {
+      params.append('analysis_type', options.analysisType);
+    }
+    if (options.userPrompt) {
+      params.append('user_prompt', options.userPrompt);
+    }
+    if (options.sectionNumber) {
+      params.append('section_number', options.sectionNumber);
+    }
+
+    const url = `${BACKEND_BASE_URL}/ai/analyze/md?${params.toString()}`;
+
+    try {
+      const response = await fetch(url, {
+        method: 'POST',
+        body: formData,
+      });
+
+      if (!response.ok) {
+        const error = await response.json();
+        throw new Error(error.detail || 'Markdown AI 分析失败');
+      }
+
+      return await response.json();
+    } catch (error) {
+      console.error('Markdown AI 分析失败:', error);
+      throw error;
+    }
+  },
+
+  /**
+   * 流式分析 Markdown 文件 (SSE)
+   */
+  async analyzeMarkdownStream(
+    file: File,
+    options: {
+      analysisType?: MarkdownAnalysisType;
+      userPrompt?: string;
+      sectionNumber?: string;
+    } = {},
+    onChunk?: (chunk: { type: string; delta?: string; error?: string }) => void
+  ): Promise<string> {
+    const formData = new FormData();
+    formData.append('file', file);
+
+    const params = new URLSearchParams();
+    if (options.analysisType) {
+      params.append('analysis_type', options.analysisType);
+    }
+    if (options.userPrompt) {
+      params.append('user_prompt', options.userPrompt);
+    }
+    if (options.sectionNumber) {
+      params.append('section_number', options.sectionNumber);
+    }
+
+    const url = `${BACKEND_BASE_URL}/ai/analyze/md/stream?${params.toString()}`;
+
+    try {
+      const response = await fetch(url, {
+        method: 'POST',
+        body: formData,
+      });
+
+      if (!response.ok) {
+        const error = await response.json();
+        throw new Error(error.detail || 'Markdown AI 流式分析失败');
+      }
+
+      const reader = response.body?.getReader();
+      if (!reader) throw new Error('无法读取响应流');
+
+      const decoder = new TextDecoder();
+      let fullResponse = '';
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        const chunk = decoder.decode(value);
+        const lines = chunk.split('\n');
+
+        for (const line of lines) {
+          if (line.startsWith('data: ')) {
+            const data = line.slice(6);
+            if (data === '[DONE]') continue;
+
+            try {
+              const parsed = JSON.parse(data);
+              if (parsed.type === 'content' && parsed.delta) {
+                fullResponse += parsed.delta;
+                onChunk?.({ type: 'content', delta: parsed.delta });
+              } else if (parsed.type === 'done') {
+                fullResponse = parsed.full_response || fullResponse;
+              } else if (parsed.error) {
+                onChunk?.({ type: 'error', error: parsed.error });
+              }
+            } catch {
+              // Ignore parse errors for incomplete JSON
+            }
+          }
+        }
+      }
+
+      return fullResponse;
+    } catch (error) {
+      console.error('Markdown AI 流式分析失败:', error);
+      throw error;
+    }
+  },
+
+  /**
+   * 获取 Markdown 文档大纲（分章节信息）
+   */
+  async getMarkdownOutline(file: File): Promise<MarkdownOutlineResult> {
+    const formData = new FormData();
+    formData.append('file', file);
+
+    const url = `${BACKEND_BASE_URL}/ai/analyze/md/outline`;
+
+    try {
+      const response = await fetch(url, {
+        method: 'GET',
+        body: formData,
+      });
+
+      if (!response.ok) {
+        const error = await response.json();
+        throw new Error(error.detail || '获取 Markdown 大纲失败');
+      }
+
+      return await response.json();
+    } catch (error) {
+      console.error('获取 Markdown 大纲失败:', error);
       throw error;
     }
   },

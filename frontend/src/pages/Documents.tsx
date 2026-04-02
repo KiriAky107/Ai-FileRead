@@ -19,7 +19,11 @@ import {
   TrendingUp,
   Download,
   Brain,
-  Settings2
+  Settings2,
+  List,
+  MessageSquareCode,
+  Tag,
+  HelpCircle
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -33,7 +37,7 @@ import { Checkbox } from '@/components/ui/checkbox';
 import { toast } from 'sonner';
 import { cn } from '@/lib/utils';
 import { Skeleton } from '@/components/ui/skeleton';
-import { backendApi, type ExcelParseResult, aiApi } from '@/db/backend-api';
+import { backendApi, type ExcelParseResult, type AIMarkdownAnalyzeResult, type MarkdownSection, aiApi } from '@/db/backend-api';
 import {
   Table as TableComponent,
   TableBody,
@@ -77,6 +81,15 @@ const Documents: React.FC = () => {
   const [aiAnalysis, setAiAnalysis] = useState<any>(null);
   const [analysisCharts, setAnalysisCharts] = useState<any>(null);
   const [analysisTypes, setAnalysisTypes] = useState<Array<{ value: string; label: string; description: string }>>([]);
+
+  // Markdown AI 分析相关状态
+  const [mdAnalysis, setMdAnalysis] = useState<AIMarkdownAnalyzeResult | null>(null);
+  const [mdAnalysisType, setMdAnalysisType] = useState<'summary' | 'outline' | 'key_points' | 'questions' | 'tags' | 'qa' | 'statistics' | 'section'>('summary');
+  const [mdUserPrompt, setMdUserPrompt] = useState('');
+  const [mdSections, setMdSections] = useState<MarkdownSection[]>([]);
+  const [mdSelectedSection, setMdSelectedSection] = useState<string>('');
+  const [mdStreaming, setMdStreaming] = useState(false);
+  const [mdStreamingContent, setMdStreamingContent] = useState('');
 
   // 解析选项
   const [parseOptions, setParseOptions] = useState({
@@ -144,6 +157,9 @@ const Documents: React.FC = () => {
     setAiAnalysis(null);
     setAnalysisCharts(null);
     setExpandedSheet(null);
+    setMdAnalysis(null);
+    setMdSections([]);
+    setMdStreamingContent('');
 
     const ext = file.name.split('.').pop()?.toLowerCase();
 
@@ -163,6 +179,9 @@ const Documents: React.FC = () => {
         } else {
           toast.error(result.error || '解析失败');
         }
+      } else if (ext === 'md' || ext === 'markdown') {
+        // Markdown 文件：获取大纲
+        await fetchMdOutline();
       } else {
         // 其他文档使用通用上传接口
         const result = await backendApi.uploadDocument(file);
@@ -403,6 +422,105 @@ const Documents: React.FC = () => {
     }
   };
 
+  const isMarkdownFile = (filename: string) => {
+    const ext = filename.split('.').pop()?.toLowerCase();
+    return ext === 'md' || ext === 'markdown';
+  };
+
+  // Markdown AI 分析处理
+  const handleMdAnalyze = async () => {
+    if (!uploadedFile || !isMarkdownFile(uploadedFile.name)) {
+      toast.error('请先上传 Markdown 文件');
+      return;
+    }
+
+    setAnalyzing(true);
+    setMdAnalysis(null);
+
+    try {
+      const result = await aiApi.analyzeMarkdown(uploadedFile, {
+        analysisType: mdAnalysisType,
+        userPrompt: mdUserPrompt,
+        sectionNumber: mdSelectedSection || undefined
+      });
+
+      if (result.success) {
+        toast.success('Markdown AI 分析完成');
+        setMdAnalysis(result);
+      } else {
+        toast.error(result.error || 'AI 分析失败');
+      }
+    } catch (error: any) {
+      toast.error(error.message || 'AI 分析失败');
+    } finally {
+      setAnalyzing(false);
+    }
+  };
+
+  // 流式分析 Markdown
+  const handleMdAnalyzeStream = async () => {
+    if (!uploadedFile || !isMarkdownFile(uploadedFile.name)) {
+      toast.error('请先上传 Markdown 文件');
+      return;
+    }
+
+    setAnalyzing(true);
+    setMdStreaming(true);
+    setMdStreamingContent('');
+    setMdAnalysis(null);
+
+    try {
+      await aiApi.analyzeMarkdownStream(
+        uploadedFile,
+        {
+          analysisType: mdAnalysisType,
+          userPrompt: mdUserPrompt,
+          sectionNumber: mdSelectedSection || undefined
+        },
+        (chunk: { type: string; delta?: string; error?: string }) => {
+          if (chunk.type === 'content' && chunk.delta) {
+            setMdStreamingContent(prev => prev + chunk.delta);
+          } else if (chunk.type === 'error') {
+            toast.error(chunk.error || '流式分析出错');
+          }
+        }
+      );
+    } catch (error: any) {
+      toast.error(error.message || 'AI 分析失败');
+    } finally {
+      setAnalyzing(false);
+      setMdStreaming(false);
+    }
+  };
+
+  // 获取 Markdown 文档大纲（分章节）
+  const fetchMdOutline = async () => {
+    if (!uploadedFile || !isMarkdownFile(uploadedFile.name)) return;
+
+    try {
+      const result = await aiApi.getMarkdownOutline(uploadedFile);
+      if (result.success && result.outline) {
+        setMdSections(result.outline);
+      }
+    } catch (error) {
+      console.error('获取大纲失败:', error);
+    }
+  };
+
+  const getMdAnalysisIcon = (type: string) => {
+    switch (type) {
+      case 'summary': return <FileText size={20} />;
+      case 'outline': return <List size={20} />;
+      case 'key_points': return <TrendingUp size={20} />;
+      case 'statistics': return <TrendingUp size={20} />;
+      case 'section': return <FileText size={20} />;
+      case 'questions': return <MessageSquareCode size={20} />;
+      case 'tags': return <Tag size={20} />;
+      case 'qa': return <HelpCircle size={20} />;
+      default: return <Sparkles size={20} />;
+    }
+  };
+
   const formatFileSize = (bytes: number): string => {
     if (bytes === 0) return '0 B';
     const k = 1024;
@@ -600,6 +718,97 @@ const Documents: React.FC = () => {
             </Card>
           )}
 
+          {/* Markdown AI 分析选项 */}
+          {uploadedFile && isMarkdownFile(uploadedFile.name) && (
+            <Card className="border-none shadow-md bg-gradient-to-br from-purple-500/5 to-primary/5">
+              <CardHeader className="pb-4">
+                <CardTitle className="flex items-center gap-2">
+                  <Sparkles className="text-purple-500" size={20} />
+                  Markdown AI 分析
+                </CardTitle>
+              </CardHeader>
+              <CardContent className="space-y-4">
+                {/* 章节选择 */}
+                {mdSections.length > 0 && (
+                  <div className="space-y-2">
+                    <Label htmlFor="md-section" className="text-sm">指定章节（可选）</Label>
+                    <Select value={mdSelectedSection} onValueChange={setMdSelectedSection}>
+                      <SelectTrigger id="md-section" className="bg-background">
+                        <SelectValue placeholder="全文分析" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="">全文分析</SelectItem>
+                        {mdSections.map((section) => (
+                          <SelectItem key={section.number} value={section.number}>
+                            {section.number}、{section.title}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                )}
+                <div className="space-y-2">
+                  <Label htmlFor="md-analysis-type" className="text-sm">分析类型</Label>
+                  <Select value={mdAnalysisType} onValueChange={(value: any) => setMdAnalysisType(value)}>
+                    <SelectTrigger id="md-analysis-type" className="bg-background">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {[
+                        { value: 'summary', label: '文档摘要', desc: '主要内容摘要' },
+                        { value: 'outline', label: '大纲提取', desc: '提取文档结构' },
+                        { value: 'key_points', label: '关键要点', desc: '提取关键信息' },
+                        { value: 'statistics', label: '统计分析', desc: '统计数据分析' },
+                        { value: 'section', label: '章节分析', desc: '分章节详细分析' },
+                        { value: 'questions', label: '生成问题', desc: '生成理解性问题' },
+                        { value: 'tags', label: '生成标签', desc: '提取主题标签' },
+                        { value: 'qa', label: '问答对', desc: '生成问答内容' }
+                      ].map(type => (
+                        <SelectItem key={type.value} value={type.value}>
+                          <div className="flex items-center gap-2">
+                            {getMdAnalysisIcon(type.value)}
+                            <div className="flex flex-col">
+                              <span className="font-medium">{type.label}</span>
+                              <span className="text-xs text-muted-foreground">{type.desc}</span>
+                            </div>
+                          </div>
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div className="space-y-2">
+                  <Label htmlFor="md-user-prompt" className="text-sm">自定义提示词（可选）</Label>
+                  <Textarea
+                    id="md-user-prompt"
+                    placeholder="例如：请重点关注技术实现部分..."
+                    value={mdUserPrompt}
+                    onChange={(e) => setMdUserPrompt(e.target.value)}
+                    className="bg-background resize-none"
+                    rows={2}
+                  />
+                </div>
+                <div className="flex gap-2">
+                  <Button
+                    onClick={handleMdAnalyze}
+                    disabled={analyzing}
+                    className="flex-1 bg-gradient-to-r from-purple-500 to-primary hover:from-purple-500/90 hover:to-primary/90"
+                  >
+                    {analyzing && !mdStreaming ? <><Loader2 className="mr-2 animate-spin" size={16} /> 分析中...</> : <><Sparkles className="mr-2" size={16} />普通分析</>}
+                  </Button>
+                  <Button
+                    onClick={handleMdAnalyzeStream}
+                    disabled={analyzing}
+                    variant="outline"
+                    className="flex-1"
+                  >
+                    {analyzing && mdStreaming ? <><Loader2 className="mr-2 animate-spin" size={16} /> 流式...</> : <><Sparkles className="mr-2" size={16} />流式分析</>}
+                  </Button>
+                </div>
+              </CardContent>
+            </Card>
+          )}
+
           {/* 数据操作 */}
           {parseResult?.success && (
             <Card className="border-none shadow-md bg-gradient-to-br from-emerald-500/5 to-blue-500/5">
@@ -657,6 +866,45 @@ const Documents: React.FC = () => {
                 ) : (
                   aiAnalysis.analysis?.analysis && <Markdown content={aiAnalysis.analysis.analysis} />
                 )}
+              </CardContent>
+            </Card>
+          )}
+
+          {/* Markdown AI 分析结果 */}
+          {(mdAnalysis || mdStreamingContent) && (
+            <Card className="border-none shadow-md border-l-4 border-l-purple-500">
+              <CardHeader>
+                <div className="flex items-center justify-between">
+                  <div className="space-y-1">
+                    <CardTitle className="flex items-center gap-2">
+                      <Sparkles className="text-purple-500" size={20} />
+                      Markdown AI 分析结果
+                      {mdStreaming && <Badge variant="default" className="ml-2 bg-purple-500">流式输出中</Badge>}
+                    </CardTitle>
+                    {mdAnalysis && (
+                      <CardDescription>
+                        {mdAnalysis.filename} • {mdAnalysis.word_count || 0} 字 • {mdAnalysis.analysis_type}
+                        {mdAnalysis.section && ` • ${mdAnalysis.section}`}
+                      </CardDescription>
+                    )}
+                  </div>
+                  {mdAnalysis?.structure && (
+                    <Badge variant="secondary">
+                      {mdAnalysis.structure.title_count || 0} 标题 • {mdAnalysis.structure.section_count || 0} 章节
+                    </Badge>
+                  )}
+                </div>
+              </CardHeader>
+              <CardContent className="max-h-[500px] overflow-y-auto">
+                {/* 流式内容优先显示 */}
+                {mdStreamingContent && (
+                  <div className="animate-pulse text-sm text-muted-foreground mb-4">
+                    流式输出中...
+                  </div>
+                )}
+                {mdStreamingContent && <Markdown content={mdStreamingContent} />}
+                {mdAnalysis?.analysis && !mdStreamingContent && <Markdown content={mdAnalysis.analysis} />}
+                {!mdAnalysis?.success && !mdStreamingContent && <p className="text-sm text-destructive">{mdAnalysis?.error || '分析失败'}</p>}
               </CardContent>
             </Card>
           )}

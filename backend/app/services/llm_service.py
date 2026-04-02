@@ -2,7 +2,7 @@
 LLM 服务模块 - 封装大模型 API 调用
 """
 import logging
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, AsyncGenerator
 import httpx
 
 from app.config import settings
@@ -85,6 +85,71 @@ class LLMService:
             return response["choices"][0]["message"]["content"]
         except (KeyError, IndexError) as e:
             logger.error(f"解析 API 响应失败: {str(e)}")
+            raise
+
+    async def chat_stream(
+        self,
+        messages: List[Dict[str, str]],
+        temperature: float = 0.7,
+        max_tokens: Optional[int] = None,
+        **kwargs
+    ) -> AsyncGenerator[Dict[str, Any], None]:
+        """
+        流式调用聊天 API
+
+        Args:
+            messages: 消息列表
+            temperature: 温度参数
+            max_tokens: 最大 token 数
+            **kwargs: 其他参数
+
+        Yields:
+            Dict[str, Any]: 包含 delta 内容的块
+        """
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json"
+        }
+
+        payload = {
+            "model": self.model_name,
+            "messages": messages,
+            "temperature": temperature,
+            "stream": True
+        }
+
+        if max_tokens:
+            payload["max_tokens"] = max_tokens
+
+        payload.update(kwargs)
+
+        try:
+            async with httpx.AsyncClient(timeout=120.0) as client:
+                async with client.stream(
+                    "POST",
+                    f"{self.base_url}/chat/completions",
+                    headers=headers,
+                    json=payload
+                ) as response:
+                    async for line in response.aiter_lines():
+                        if line.startswith("data: "):
+                            data = line[6:]  # Remove "data: " prefix
+                            if data == "[DONE]":
+                                break
+                            try:
+                                import json as json_module
+                                chunk = json_module.loads(data)
+                                delta = chunk.get("choices", [{}])[0].get("delta", {}).get("content", "")
+                                if delta:
+                                    yield {"content": delta}
+                            except json_module.JSONDecodeError:
+                                continue
+
+        except httpx.HTTPStatusError as e:
+            logger.error(f"LLM 流式 API 请求失败: {e.response.status_code}")
+            raise
+        except Exception as e:
+            logger.error(f"LLM 流式 API 调用异常: {str(e)}")
             raise
 
     async def analyze_excel_data(
