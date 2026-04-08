@@ -46,6 +46,7 @@ type TemplateField = {
   name: string;
   field_type: string;
   required: boolean;
+  hint?: string;
 };
 
 const TemplateFill: React.FC = () => {

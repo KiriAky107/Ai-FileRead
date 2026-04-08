@@ -103,7 +103,9 @@ export interface FillResult {
     field: string;
     value: any;
     source: string;
+    confidence?: number;
   }>;
+  source_doc_count?: number;
   error?: string;
 }
 
@@ -617,6 +619,39 @@ export const backendApi = {
       return await response.json();
     } catch (error) {
       console.error('上传模板失败:', error);
+      throw error;
+    }
+  },
+
+  /**
+   * 从已上传的模板提取字段定义
+   */
+  async extractTemplateFields(
+    templateId: string,
+    fileType: string = 'xlsx'
+  ): Promise<{
+    success: boolean;
+    fields: TemplateField[];
+  }> {
+    const url = `${BACKEND_BASE_URL}/templates/fields`;
+
+    try {
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          template_id: templateId,
+          file_type: fileType,
+        }),
+      });
+
+      if (!response.ok) {
+        const error = await response.json();
+        throw new Error(error.detail || '提取字段失败');
+      }
+      return await response.json();
+    } catch (error) {
+      console.error('提取字段失败:', error);
       throw error;
     }
   },
