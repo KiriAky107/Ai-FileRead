@@ -128,8 +128,12 @@ const TemplateFill: React.FC = () => {
     setStep('filling');
 
     try {
-      // 调用后端填表接口
-      const result = await backendApi.fillTemplate('temp-template-id', templateFields);
+      // 调用后端填表接口，传递选中的文档ID
+      const result = await backendApi.fillTemplate(
+        'temp-template-id',
+        templateFields,
+        selectedDocs  // 传递源文档ID列表
+      );
       setFilledResult(result);
       setStep('preview');
       toast.success('表格填写完成');

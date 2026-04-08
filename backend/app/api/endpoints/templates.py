@@ -13,7 +13,7 @@ import pandas as pd
 from pydantic import BaseModel
 
 from app.services.template_fill_service import template_fill_service, TemplateField
-from app.services.excel_storage_service import excel_storage_service
+from app.services.file_service import file_service
 
 logger = logging.getLogger(__name__)
 
@@ -28,13 +28,15 @@ class TemplateFieldRequest(BaseModel):
     name: str
     field_type: str = "text"
     required: bool = True
+    hint: str = ""
 
 
 class FillRequest(BaseModel):
     """填写请求"""
     template_id: str
     template_fields: List[TemplateFieldRequest]
-    source_doc_ids: Optional[List[str]] = None
+    source_doc_ids: Optional[List[str]] = None  # MongoDB 文档 ID 列表
+    source_file_paths: Optional[List[str]] = None  # 源文档文件路径列表
     user_hint: Optional[str] = None
 
 
@@ -71,7 +73,6 @@ async def upload_template(
 
     try:
         # 保存文件
-        from app.services.file_service import file_service
         content = await file.read()
         saved_path = file_service.save_uploaded_file(
             content,
@@ -87,7 +88,7 @@ async def upload_template(
 
         return {
             "success": True,
-            "template_id": saved_path,  # 使用文件路径作为ID
+            "template_id": saved_path,
             "filename": file.filename,
             "file_type": file_ext,
             "fields": [
@@ -95,7 +96,8 @@ async def upload_template(
                     "cell": f.cell,
                     "name": f.name,
                     "field_type": f.field_type,
-                    "required": f.required
+                    "required": f.required,
+                    "hint": f.hint
                 }
                 for f in template_fields
             ],
@@ -135,7 +137,8 @@ async def extract_template_fields(
                     "cell": f.cell,
                     "name": f.name,
                     "field_type": f.field_type,
-                    "required": f.required
+                    "required": f.required,
+                    "hint": f.hint
                 }
                 for f in fields
             ]
@@ -153,7 +156,7 @@ async def fill_template(
     """
     执行表格填写
 
-    根据提供的字段定义，从已上传的文档中检索信息并填写
+    根据提供的字段定义，从源文档中检索信息并填写
 
     Args:
         request: 填写请求
@@ -168,7 +171,8 @@ async def fill_template(
                 cell=f.cell,
                 name=f.name,
                 field_type=f.field_type,
-                required=f.required
+                required=f.required,
+                hint=f.hint
             )
             for f in request.template_fields
         ]
@@ -177,6 +181,7 @@ async def fill_template(
         result = await template_fill_service.fill_template(
             template_fields=fields,
             source_doc_ids=request.source_doc_ids,
+            source_file_paths=request.source_file_paths,
             user_hint=request.user_hint
         )
 
@@ -194,6 +199,8 @@ async def export_filled_template(
     """
     导出填写后的表格
 
+    支持 Excel (.xlsx) 和 Word (.docx) 格式
+
     Args:
         request: 导出请求
 
@@ -201,25 +208,124 @@ async def export_filled_template(
         文件流
     """
     try:
-        # 创建 DataFrame
-        df = pd.DataFrame([request.filled_data])
+        if request.format == "xlsx":
+            return await _export_to_excel(request.filled_data, request.template_id)
+        elif request.format == "docx":
+            return await _export_to_word(request.filled_data, request.template_id)
+        else:
+            raise HTTPException(
+                status_code=400,
+                detail=f"不支持的导出格式: {request.format}，仅支持 xlsx/docx"
+            )
 
-        # 导出为 Excel
-        output = io.BytesIO()
-        with pd.ExcelWriter(output, engine='openpyxl') as writer:
-            df.to_excel(writer, index=False, sheet_name='填写结果')
-
-        output.seek(0)
-
-        # 生成文件名
-        filename = f"filled_template.{request.format}"
-
-        return StreamingResponse(
-            io.BytesIO(output.getvalue()),
-            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            headers={"Content-Disposition": f"attachment; filename={filename}"}
-        )
-
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"导出失败: {str(e)}")
         raise HTTPException(status_code=500, detail=f"导出失败: {str(e)}")
+
+
+async def _export_to_excel(filled_data: dict, template_id: str) -> StreamingResponse:
+    """导出为 Excel 格式"""
+    # 将字典转换为单行 DataFrame
+    df = pd.DataFrame([filled_data])
+
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine='openpyxl') as writer:
+        df.to_excel(writer, index=False, sheet_name='填写结果')
+
+    output.seek(0)
+
+    filename = f"filled_template.xlsx"
+
+    return StreamingResponse(
+        io.BytesIO(output.getvalue()),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f"attachment; filename={filename}"}
+    )
+
+
+async def _export_to_word(filled_data: dict, template_id: str) -> StreamingResponse:
+    """导出为 Word 格式"""
+    from docx import Document
+    from docx.shared import Pt, RGBColor
+    from docx.enum.text import WD_ALIGN_PARAGRAPH
+
+    doc = Document()
+
+    # 添加标题
+    title = doc.add_heading('填写结果', level=1)
+    title.alignment = WD_ALIGN_PARAGRAPH.CENTER
+
+    # 添加填写时间和模板信息
+    from datetime import datetime
+    info_para = doc.add_paragraph()
+    info_para.add_run(f"模板ID: {template_id}\n").bold = True
+    info_para.add_run(f"导出时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+
+    doc.add_paragraph()  # 空行
+
+    # 添加字段表格
+    table = doc.add_table(rows=1, cols=3)
+    table.style = 'Light Grid Accent 1'
+
+    # 表头
+    header_cells = table.rows[0].cells
+    header_cells[0].text = '字段名'
+    header_cells[1].text = '填写值'
+    header_cells[2].text = '状态'
+
+    for field_name, field_value in filled_data.items():
+        row_cells = table.add_row().cells
+        row_cells[0].text = field_name
+        row_cells[1].text = str(field_value) if field_value else ''
+        row_cells[2].text = '已填写' if field_value else '为空'
+
+    # 保存到 BytesIO
+    output = io.BytesIO()
+    doc.save(output)
+    output.seek(0)
+
+    filename = f"filled_template.docx"
+
+    return StreamingResponse(
+        io.BytesIO(output.getvalue()),
+        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        headers={"Content-Disposition": f"attachment; filename={filename}"}
+    )
+
+
+@router.post("/export/excel")
+async def export_to_excel(
+    filled_data: dict,
+    template_id: str = Query(..., description="模板ID")
+):
+    """
+    专门导出为 Excel 格式
+
+    Args:
+        filled_data: 填写数据
+        template_id: 模板ID
+
+    Returns:
+        Excel 文件流
+    """
+    return await _export_to_excel(filled_data, template_id)
+
+
+@router.post("/export/word")
+async def export_to_word(
+    filled_data: dict,
+    template_id: str = Query(..., description="模板ID")
+):
+    """
+    专门导出为 Word 格式
+
+    Args:
+        filled_data: 填写数据
+        template_id: 模板ID
+
+    Returns:
+        Word 文件流
+    """
+    return await _export_to_word(filled_data, template_id)

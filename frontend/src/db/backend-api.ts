@@ -92,6 +92,7 @@ export interface TemplateField {
   name: string;
   field_type: string;
   required: boolean;
+  hint?: string;
 }
 
 // 表格填写结果
@@ -625,7 +626,10 @@ export const backendApi = {
    */
   async fillTemplate(
     templateId: string,
-    templateFields: TemplateField[]
+    templateFields: TemplateField[],
+    sourceDocIds?: string[],
+    sourceFilePaths?: string[],
+    userHint?: string
   ): Promise<FillResult> {
     const url = `${BACKEND_BASE_URL}/templates/fill`;
 
@@ -636,6 +640,9 @@ export const backendApi = {
         body: JSON.stringify({
           template_id: templateId,
           template_fields: templateFields,
+          source_doc_ids: sourceDocIds || [],
+          source_file_paths: sourceFilePaths || [],
+          user_hint: userHint || null,
         }),
       });
 
