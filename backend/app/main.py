@@ -2,21 +2,141 @@
 FastAPI 应用主入口
 """
 import logging
+import logging.handlers
+import sys
+import uuid
 from contextlib import asynccontextmanager
+from typing import Callable
+from functools import wraps
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.middleware.base import BaseHTTPMiddleware
 
 from app.config import settings
 from app.api import api_router
 from app.core.database import mysql_db, mongodb, redis_db
 
-# 配置日志
-logging.basicConfig(
-    level=logging.INFO if settings.DEBUG else logging.WARNING,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-)
+# ==================== 日志配置 ====================
+
+def setup_logging():
+    """配置应用日志系统"""
+    import os
+    from pathlib import Path
+
+    # 根日志配置
+    log_level = logging.DEBUG if settings.DEBUG else logging.INFO
+
+    # 日志目录
+    log_dir = Path("data/logs")
+    log_dir.mkdir(parents=True, exist_ok=True)
+
+    # 日志文件路径
+    log_file = log_dir / "app.log"
+    error_log_file = log_dir / "error.log"
+
+    # 控制台处理器
+    console_handler = logging.StreamHandler(sys.stdout)
+    console_handler.setLevel(log_level)
+    console_formatter = logging.Formatter(
+        fmt="%(asctime)s | %(levelname)-8s | %(name)s:%(lineno)d | %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S"
+    )
+    console_handler.setFormatter(console_formatter)
+
+    # 文件处理器 (所有日志)
+    file_handler = logging.handlers.RotatingFileHandler(
+        log_file,
+        maxBytes=10 * 1024 * 1024,  # 10MB
+        backupCount=5,
+        encoding="utf-8"
+    )
+    file_handler.setLevel(logging.DEBUG)
+    file_formatter = logging.Formatter(
+        fmt="%(asctime)s | %(levelname)-8s | %(name)s:%(lineno)d | %(funcName)s | %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S"
+    )
+    file_handler.setFormatter(file_formatter)
+
+    # 错误日志处理器 (仅ERROR及以上)
+    error_file_handler = logging.handlers.RotatingFileHandler(
+        error_log_file,
+        maxBytes=10 * 1024 * 1024,  # 10MB
+        backupCount=5,
+        encoding="utf-8"
+    )
+    error_file_handler.setLevel(logging.ERROR)
+    error_file_handler.setFormatter(file_formatter)
+
+    # 根日志器
+    root_logger = logging.getLogger()
+    root_logger.setLevel(logging.DEBUG)
+    root_logger.handlers = []
+    root_logger.addHandler(console_handler)
+    root_logger.addHandler(file_handler)
+    root_logger.addHandler(error_file_handler)
+
+    # 第三方库日志级别
+    for lib in ["uvicorn", "uvicorn.access", "fastapi", "httpx", "sqlalchemy"]:
+        logging.getLogger(lib).setLevel(logging.WARNING)
+
+    root_logger.info(f"日志系统初始化完成 | 日志目录: {log_dir}")
+    root_logger.info(f"主日志文件: {log_file} | 错误日志: {error_log_file}")
+
+    return root_logger
+
+# 初始化日志
+setup_logging()
 logger = logging.getLogger(__name__)
+
+
+# ==================== 请求日志中间件 ====================
+
+class RequestLoggingMiddleware(BaseHTTPMiddleware):
+    """请求日志中间件 - 记录每个请求的详细信息"""
+
+    async def dispatch(self, request: Request, call_next: Callable) -> Response:
+        # 生成请求ID
+        request_id = str(uuid.uuid4())[:8]
+        request.state.request_id = request_id
+
+        # 记录请求
+        logger.info(f"→ [{request_id}] {request.method} {request.url.path}")
+
+        try:
+            response = await call_next(request)
+
+            # 记录响应
+            logger.info(
+                f"← [{request_id}] {request.method} {request.url.path} "
+                f"| 状态: {response.status_code} | 耗时: N/A"
+            )
+
+            # 添加请求ID到响应头
+            response.headers["X-Request-ID"] = request_id
+            return response
+
+        except Exception as e:
+            logger.error(f"✗ [{request_id}] {request.method} {request.url.path} | 异常: {str(e)}")
+            raise
+
+
+# ==================== 请求追踪装饰器 ====================
+
+def log_async_function(func: Callable) -> Callable:
+    """异步函数日志装饰器"""
+    @wraps(func)
+    async def wrapper(*args, **kwargs):
+        func_name = func.__name__
+        logger.debug(f"→ {func_name} 开始执行")
+        try:
+            result = await func(*args, **kwargs)
+            logger.debug(f"← {func_name} 执行完成")
+            return result
+        except Exception as e:
+            logger.error(f"✗ {func_name} 执行失败: {str(e)}")
+            raise
+    return wrapper
 
 
 @asynccontextmanager
@@ -82,6 +202,9 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# 添加请求日志中间件
+app.add_middleware(RequestLoggingMiddleware)
 
 # 注册 API 路由
 app.include_router(api_router, prefix=settings.API_V1_STR)

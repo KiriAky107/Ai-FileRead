@@ -31,6 +31,178 @@ class TableRAGService:
         self.rag = rag_service
         self.excel_storage = excel_storage_service
 
+    def _extract_sheet_names_from_xml(self, file_path: str) -> List[str]:
+        """
+        从 Excel 文件的 XML 中提取工作表名称
+
+        某些 Excel 文件由于包含非标准元素，pandas/openpyxl 无法正确解析工作表列表，
+        此时需要直接从 XML 中提取。
+
+        Args:
+            file_path: Excel 文件路径
+
+        Returns:
+            工作表名称列表
+        """
+        import zipfile
+        from xml.etree import ElementTree as ET
+
+        try:
+            with zipfile.ZipFile(file_path, 'r') as z:
+                # 读取 workbook.xml
+                if 'xl/workbook.xml' not in z.namelist():
+                    return []
+
+                content = z.read('xl/workbook.xml')
+                root = ET.fromstring(content)
+
+                # 定义命名空间
+                ns = {'main': 'http://purl.oclc.org/ooxml/spreadsheetml/main'}
+
+                # 提取所有 sheet 的 name 属性
+                sheets = root.findall('.//main:sheet', ns)
+                return [s.get('name') for s in sheets if s.get('name')]
+
+        except Exception as e:
+            logger.warning(f"从 XML 提取工作表失败: {file_path}, error: {e}")
+            return []
+
+    def _read_excel_sheet(self, file_path: str, sheet_name: str = None, header_row: int = 0) -> pd.DataFrame:
+        """
+        读取 Excel 工作表，支持 pandas 无法解析的特殊 Excel 文件
+
+        当 pandas 的 ExcelFile 无法正确解析时，直接从 XML 读取数据。
+
+        Args:
+            file_path: Excel 文件路径
+            sheet_name: 工作表名称（如果为 None，读取第一个工作表）
+            header_row: 表头行号
+
+        Returns:
+            DataFrame
+        """
+        import zipfile
+        from xml.etree import ElementTree as ET
+
+        try:
+            # 先尝试用 pandas 正常读取
+            df = pd.read_excel(file_path, sheet_name=sheet_name, header=header_row)
+            if df is not None and not df.empty:
+                return df
+        except Exception:
+            pass
+
+        # pandas 读取失败，从 XML 直接解析
+        logger.info(f"使用 XML 方式读取 Excel: {file_path}")
+
+        try:
+            with zipfile.ZipFile(file_path, 'r') as z:
+                # 获取工作表名称
+                sheet_names = self._extract_sheet_names_from_xml(file_path)
+                if not sheet_names:
+                    raise ValueError("无法从 Excel 文件中找到工作表")
+
+                # 确定要读取的工作表
+                target_sheet = sheet_name if sheet_name and sheet_name in sheet_names else sheet_names[0]
+                sheet_index = sheet_names.index(target_sheet) + 1  # sheet1.xml, sheet2.xml, ...
+
+                # 读取 shared strings
+                shared_strings = []
+                if 'xl/sharedStrings.xml' in z.namelist():
+                    ss_content = z.read('xl/sharedStrings.xml')
+                    ss_root = ET.fromstring(ss_content)
+                    ns = {'main': 'http://purl.oclc.org/ooxml/spreadsheetml/main'}
+                    for si in ss_root.findall('.//main:si', ns):
+                        t = si.find('.//main:t', ns)
+                        if t is not None:
+                            shared_strings.append(t.text or '')
+                        else:
+                            shared_strings.append('')
+
+                # 读取工作表
+                sheet_file = f'xl/worksheets/sheet{sheet_index}.xml'
+                if sheet_file not in z.namelist():
+                    raise ValueError(f"工作表文件 {sheet_file} 不存在")
+
+                sheet_content = z.read(sheet_file)
+                root = ET.fromstring(sheet_content)
+                ns = {'main': 'http://purl.oclc.org/ooxml/spreadsheetml/main'}
+
+                # 解析行
+                rows_data = []
+                for row in root.findall('.//main:row', ns):
+                    row_idx = int(row.get('r', 0))
+                    # header_row 是 0-indexed，row_idx 是 1-indexed
+                    # 如果 header_row=0 表示第一行是表头，需要跳过 row_idx=1
+                    if row_idx <= header_row + 1:
+                        continue  # 跳过表头行
+
+                    row_cells = {}
+                    for cell in row.findall('main:c', ns):
+                        cell_ref = cell.get('r', '')
+                        col_letters = ''.join(filter(str.isalpha, cell_ref))
+                        cell_type = cell.get('t', 'n')
+                        v = cell.find('main:v', ns)
+
+                        if v is not None and v.text:
+                            if cell_type == 's':
+                                # shared string
+                                try:
+                                    val = shared_strings[int(v.text)]
+                                except (ValueError, IndexError):
+                                    val = v.text
+                            elif cell_type == 'b':
+                                # boolean
+                                val = v.text == '1'
+                            else:
+                                # number or other
+                                val = v.text
+                        else:
+                            val = None
+
+                        row_cells[col_letters] = val
+
+                    if row_cells:
+                        rows_data.append(row_cells)
+
+                # 转换为 DataFrame
+                if not rows_data:
+                    return pd.DataFrame()
+
+                df = pd.DataFrame(rows_data)
+
+                # 如果有 header_row，重新设置列名
+                if header_row >= 0:
+                    # 重新读取第一行作为表头
+                    first_row_sheet = f'xl/worksheets/sheet{sheet_index}.xml'
+                    sheet_content = z.read(first_row_sheet)
+                    root = ET.fromstring(sheet_content)
+                    first_row = root.find(f'.//main:row[@r="{header_row + 1}"]', ns)
+                    if first_row is not None:
+                        headers = {}
+                        for cell in first_row.findall('main:c', ns):
+                            cell_ref = cell.get('r', '')
+                            col_letters = ''.join(filter(str.isalpha, cell_ref))
+                            cell_type = cell.get('t', 'n')
+                            v = cell.find('main:v', ns)
+                            if v is not None and v.text:
+                                if cell_type == 's':
+                                    try:
+                                        headers[col_letters] = shared_strings[int(v.text)]
+                                    except (ValueError, IndexError):
+                                        headers[col_letters] = v.text
+                                else:
+                                    headers[col_letters] = v.text
+                        # 重命名列
+                        df.columns = [headers.get(col, col) for col in df.columns]
+
+                logger.info(f"XML 解析完成: {len(df)} 行, {len(df.columns)} 列")
+                return df
+
+        except Exception as e:
+            logger.error(f"XML 解析 Excel 失败: {e}")
+            raise
+
     async def generate_field_description(
         self,
         table_name: str,
@@ -126,26 +298,49 @@ class TableRAGService:
         }
 
         try:
-            # 1. 读取 Excel
+            # 1. 先检查 Excel 文件是否有效
+            logger.info(f"正在检查Excel文件: {file_path}")
+            try:
+                xls_file = pd.ExcelFile(file_path)
+                sheet_names = xls_file.sheet_names
+                logger.info(f"Excel文件工作表: {sheet_names}")
+
+                # 如果 sheet_names 为空，尝试从 XML 中手动提取
+                if not sheet_names:
+                    sheet_names = self._extract_sheet_names_from_xml(file_path)
+                    logger.info(f"从XML提取工作表: {sheet_names}")
+
+                if not sheet_names:
+                    return {"success": False, "error": "Excel 文件没有工作表"}
+            except Exception as e:
+                logger.error(f"读取Excel文件失败: {file_path}, error: {e}")
+                return {"success": False, "error": f"无法读取Excel文件: {str(e)}"}
+
+            # 2. 读取 Excel
             if sheet_name:
-                df = pd.read_excel(file_path, sheet_name=sheet_name, header=header_row)
-            else:
-                df = pd.read_excel(file_path, header=header_row)
+                # 验证指定的sheet_name是否存在
+                if sheet_name not in sheet_names:
+                    logger.warning(f"指定的工作表 '{sheet_name}' 不存在，使用第一个工作表: {sheet_names[0]}")
+                    sheet_name = sheet_names[0]
+            df = self._read_excel_sheet(file_path, sheet_name=sheet_name, header_row=header_row)
+
+            logger.info(f"读取到数据: {len(df)} 行, {len(df.columns)} 列")
 
             if df.empty:
                 return {"success": False, "error": "Excel 文件为空"}
 
             # 清理列名
             df.columns = [str(c) for c in df.columns]
-            table_name = excel_storage._sanitize_table_name(filename)
+            table_name = self.excel_storage._sanitize_table_name(filename)
             results["table_name"] = table_name
             results["field_count"] = len(df.columns)
+            logger.info(f"表名: {table_name}, 字段数: {len(df.columns)}")
 
-            # 2. 初始化 RAG (如果需要)
+            # 3. 初始化 RAG (如果需要)
             if not self.rag._initialized:
                 self.rag._init_vector_store()
 
-            # 3. 为每个字段生成描述并索引
+            # 4. 为每个字段生成描述并索引
             all_fields_data = {}
             for col in df.columns:
                 # 采样示例值
@@ -187,7 +382,8 @@ class TableRAGService:
                     logger.error(error_msg)
                     results["errors"].append(error_msg)
 
-            # 4. 存储到 MySQL
+            # 5. 存储到 MySQL
+            logger.info(f"开始存储到MySQL: {filename}")
             store_result = await self.excel_storage.store_excel(
                 file_path=file_path,
                 filename=filename,

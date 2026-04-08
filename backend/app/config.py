@@ -29,6 +29,9 @@ class Settings(BaseSettings):
     LLM_BASE_URL: str = "https://api.minimax.chat"
     LLM_MODEL_NAME: str = "MiniMax-Text-01"
 
+    # ==================== RAG/Embedding 配置 ====================
+    EMBEDDING_MODEL: str = "all-MiniLM-L6-v2"
+
     # ==================== Supabase 配置 ====================
     SUPABASE_URL: str = ""
     SUPABASE_ANON_KEY: str = ""

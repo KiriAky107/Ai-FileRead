@@ -3,12 +3,15 @@
 """
 import os
 import shutil
+import logging
 from pathlib import Path
 from datetime import datetime
 from typing import Optional
 import uuid
 
 from app.config import settings
+
+logger = logging.getLogger(__name__)
 
 
 class FileService:
@@ -17,6 +20,7 @@ class FileService:
     def __init__(self):
         self.upload_dir = Path(settings.UPLOAD_DIR)
         self._ensure_upload_dir()
+        logger.info(f"FileService 初始化，上传目录: {self.upload_dir}")
 
     def _ensure_upload_dir(self):
         """确保上传目录存在"""
@@ -56,6 +60,8 @@ class FileService:
         with open(file_path, 'wb') as f:
             f.write(file_content)
 
+        file_size = len(file_content)
+        logger.info(f"文件已保存: {filename} -> {file_path} ({file_size} bytes)")
         return str(file_path)
 
     def read_file(self, file_path: str) -> bytes:

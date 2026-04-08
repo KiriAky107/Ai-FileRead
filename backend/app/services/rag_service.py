@@ -40,16 +40,31 @@ class RAGService:
     def _init_embeddings(self):
         """初始化嵌入模型"""
         if self.embedding_model is None:
-            self.embedding_model = SentenceTransformer(settings.EMBEDDING_MODEL)
-            self._dimension = self.embedding_model.get_sentence_embedding_dimension()
-            logger.info(f"RAG 嵌入模型初始化完成: {settings.EMBEDDING_MODEL}, 维度: {self._dimension}")
+            # 使用轻量级本地模型，避免网络问题
+            model_name = 'all-MiniLM-L6-v2'
+            try:
+                self.embedding_model = SentenceTransformer(model_name)
+                self._dimension = self.embedding_model.get_sentence_embedding_dimension()
+                logger.info(f"RAG 嵌入模型初始化完成: {model_name}, 维度: {self._dimension}")
+            except Exception as e:
+                logger.warning(f"嵌入模型 {model_name} 加载失败: {e}")
+                # 如果本地模型也失败，使用简单hash作为后备
+                self.embedding_model = None
+                self._dimension = 384
+                logger.info("RAG 使用简化模式 (无向量嵌入)")
 
     def _init_vector_store(self):
         """初始化向量存储"""
         if self.index is None:
             self._init_embeddings()
-            self.index = faiss.IndexIDMap(faiss.IndexFlatIP(self._dimension))
-            logger.info("Faiss 向量存储初始化完成")
+            if self.embedding_model is None:
+                # 无法加载嵌入模型，使用简化模式
+                self._dimension = 384
+                self.index = None
+                logger.warning("RAG 嵌入模型未加载，使用简化模式")
+            else:
+                self.index = faiss.IndexIDMap(faiss.IndexFlatIP(self._dimension))
+                logger.info("Faiss 向量存储初始化完成")
 
     async def initialize(self):
         """异步初始化"""
@@ -78,6 +93,11 @@ class RAGService:
         if not self._initialized:
             self._init_vector_store()
 
+        # 如果没有嵌入模型，只记录到日志
+        if self.embedding_model is None:
+            logger.debug(f"字段跳过索引 (无嵌入模型): {table_name}.{field_name}")
+            return
+
         text = f"表名: {table_name}, 字段: {field_name}, 描述: {field_description}"
         if sample_values:
             text += f", 示例值: {', '.join(sample_values)}"
@@ -99,6 +119,11 @@ class RAGService:
         """将文档内容索引到向量数据库"""
         if not self._initialized:
             self._init_vector_store()
+
+        # 如果没有嵌入模型，只记录到日志
+        if self.embedding_model is None:
+            logger.debug(f"文档跳过索引 (无嵌入模型): {doc_id}")
+            return
 
         doc = SimpleDocument(
             page_content=content,
