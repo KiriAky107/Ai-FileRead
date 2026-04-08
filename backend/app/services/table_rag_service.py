@@ -47,6 +47,12 @@ class TableRAGService:
         import zipfile
         from xml.etree import ElementTree as ET
 
+        # 尝试多种命名空间
+        namespaces = [
+            'http://schemas.openxmlformats.org/spreadsheetml/2006/main',
+            'http://purl.oclc.org/ooxml/spreadsheetml/main',
+        ]
+
         try:
             with zipfile.ZipFile(file_path, 'r') as z:
                 # 读取 workbook.xml
@@ -56,12 +62,27 @@ class TableRAGService:
                 content = z.read('xl/workbook.xml')
                 root = ET.fromstring(content)
 
-                # 定义命名空间
-                ns = {'main': 'http://purl.oclc.org/ooxml/spreadsheetml/main'}
+                # 尝试多种命名空间
+                for ns_uri in namespaces:
+                    ns = {'main': ns_uri}
+                    sheets = root.findall('.//main:sheet', ns)
+                    if sheets:
+                        names = [s.get('name') for s in sheets if s.get('name')]
+                        if names:
+                            logger.info(f"使用命名空间 {ns_uri} 提取到工作表: {names}")
+                            return names
 
-                # 提取所有 sheet 的 name 属性
-                sheets = root.findall('.//main:sheet', ns)
-                return [s.get('name') for s in sheets if s.get('name')]
+                # 如果都没找到，尝试不带命名空间
+                sheets = root.findall('.//sheet')
+                if not sheets:
+                    sheets = root.findall('.//{*}sheet')
+                names = [s.get('name') for s in sheets if s.get('name')]
+                if names:
+                    logger.info(f"使用通配符提取到工作表: {names}")
+                    return names
+
+                logger.warning(f"无法从 XML 提取工作表，尝试的文件: {file_path}")
+                return []
 
         except Exception as e:
             logger.warning(f"从 XML 提取工作表失败: {file_path}, error: {e}")
@@ -83,6 +104,12 @@ class TableRAGService:
         """
         import zipfile
         from xml.etree import ElementTree as ET
+
+        # 定义命名空间
+        namespaces = [
+            'http://schemas.openxmlformats.org/spreadsheetml/2006/main',
+            'http://purl.oclc.org/ooxml/spreadsheetml/main',
+        ]
 
         try:
             # 先尝试用 pandas 正常读取
@@ -111,13 +138,14 @@ class TableRAGService:
                 if 'xl/sharedStrings.xml' in z.namelist():
                     ss_content = z.read('xl/sharedStrings.xml')
                     ss_root = ET.fromstring(ss_content)
-                    ns = {'main': 'http://purl.oclc.org/ooxml/spreadsheetml/main'}
-                    for si in ss_root.findall('.//main:si', ns):
-                        t = si.find('.//main:t', ns)
-                        if t is not None:
-                            shared_strings.append(t.text or '')
-                        else:
-                            shared_strings.append('')
+                    # 使用通配符查找所有 si 元素
+                    for si in ss_root.iter():
+                        if si.tag.endswith('}si') or si.tag == 'si':
+                            t = si.find('.//{*}t')
+                            if t is not None and t.text:
+                                shared_strings.append(t.text)
+                            else:
+                                shared_strings.append('')
 
                 # 读取工作表
                 sheet_file = f'xl/worksheets/sheet{sheet_index}.xml'
@@ -126,75 +154,75 @@ class TableRAGService:
 
                 sheet_content = z.read(sheet_file)
                 root = ET.fromstring(sheet_content)
-                ns = {'main': 'http://purl.oclc.org/ooxml/spreadsheetml/main'}
 
-                # 解析行
+                # 解析行 - 使用通配符查找
                 rows_data = []
-                for row in root.findall('.//main:row', ns):
-                    row_idx = int(row.get('r', 0))
-                    # header_row 是 0-indexed，row_idx 是 1-indexed
-                    # 如果 header_row=0 表示第一行是表头，需要跳过 row_idx=1
-                    if row_idx <= header_row + 1:
-                        continue  # 跳过表头行
+                headers = {}
 
-                    row_cells = {}
-                    for cell in row.findall('main:c', ns):
-                        cell_ref = cell.get('r', '')
-                        col_letters = ''.join(filter(str.isalpha, cell_ref))
-                        cell_type = cell.get('t', 'n')
-                        v = cell.find('main:v', ns)
+                for row in root.iter():
+                    if row.tag.endswith('}row') or row.tag == 'row':
+                        row_idx = int(row.get('r', 0))
 
-                        if v is not None and v.text:
-                            if cell_type == 's':
-                                # shared string
-                                try:
-                                    val = shared_strings[int(v.text)]
-                                except (ValueError, IndexError):
-                                    val = v.text
-                            elif cell_type == 'b':
-                                # boolean
-                                val = v.text == '1'
-                            else:
-                                # number or other
-                                val = v.text
-                        else:
-                            val = None
+                        # 收集表头行
+                        if row_idx == header_row + 1:
+                            for cell in row:
+                                if cell.tag.endswith('}c') or cell.tag == 'c':
+                                    cell_ref = cell.get('r', '')
+                                    col_letters = ''.join(filter(str.isalpha, cell_ref))
+                                    cell_type = cell.get('t', 'n')
+                                    v = cell.find('{*}v')
+                                    if v is not None and v.text:
+                                        if cell_type == 's':
+                                            try:
+                                                headers[col_letters] = shared_strings[int(v.text)]
+                                            except (ValueError, IndexError):
+                                                headers[col_letters] = v.text
+                                        else:
+                                            headers[col_letters] = v.text
+                                    else:
+                                        headers[col_letters] = col_letters
+                            continue
 
-                        row_cells[col_letters] = val
+                        # 跳过表头行之后的数据行
+                        if row_idx <= header_row + 1:
+                            continue
 
-                    if row_cells:
-                        rows_data.append(row_cells)
+                        row_cells = {}
+                        for cell in row:
+                            if cell.tag.endswith('}c') or cell.tag == 'c':
+                                cell_ref = cell.get('r', '')
+                                col_letters = ''.join(filter(str.isalpha, cell_ref))
+                                cell_type = cell.get('t', 'n')
+                                v = cell.find('{*}v')
+
+                                if v is not None and v.text:
+                                    if cell_type == 's':
+                                        try:
+                                            val = shared_strings[int(v.text)]
+                                        except (ValueError, IndexError):
+                                            val = v.text
+                                    elif cell_type == 'b':
+                                        val = v.text == '1'
+                                    else:
+                                        val = v.text
+                                else:
+                                    val = None
+
+                                row_cells[col_letters] = val
+
+                        if row_cells:
+                            rows_data.append(row_cells)
 
                 # 转换为 DataFrame
                 if not rows_data:
+                    logger.warning(f"XML 解析结果为空: {file_path}, sheet: {target_sheet}")
                     return pd.DataFrame()
 
                 df = pd.DataFrame(rows_data)
 
-                # 如果有 header_row，重新设置列名
-                if header_row >= 0:
-                    # 重新读取第一行作为表头
-                    first_row_sheet = f'xl/worksheets/sheet{sheet_index}.xml'
-                    sheet_content = z.read(first_row_sheet)
-                    root = ET.fromstring(sheet_content)
-                    first_row = root.find(f'.//main:row[@r="{header_row + 1}"]', ns)
-                    if first_row is not None:
-                        headers = {}
-                        for cell in first_row.findall('main:c', ns):
-                            cell_ref = cell.get('r', '')
-                            col_letters = ''.join(filter(str.isalpha, cell_ref))
-                            cell_type = cell.get('t', 'n')
-                            v = cell.find('main:v', ns)
-                            if v is not None and v.text:
-                                if cell_type == 's':
-                                    try:
-                                        headers[col_letters] = shared_strings[int(v.text)]
-                                    except (ValueError, IndexError):
-                                        headers[col_letters] = v.text
-                                else:
-                                    headers[col_letters] = v.text
-                        # 重命名列
-                        df.columns = [headers.get(col, col) for col in df.columns]
+                # 应用表头
+                if headers:
+                    df.columns = [headers.get(col, col) for col in df.columns]
 
                 logger.info(f"XML 解析完成: {len(df)} 行, {len(df.columns)} 列")
                 return df

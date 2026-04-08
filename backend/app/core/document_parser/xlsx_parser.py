@@ -67,11 +67,14 @@ class XlsxParser(BaseParser):
             xls_file = pd.ExcelFile(file_path)
             sheet_names = xls_file.sheet_names
 
+            # 如果 pandas 返回空列表，尝试从 XML 提取
             if not sheet_names:
-                return ParseResult(
-                    success=False,
-                    error=f"Excel 文件没有找到任何工作表: {file_path}"
-                )
+                sheet_names = self._extract_sheet_names_from_xml(file_path)
+                if not sheet_names:
+                    return ParseResult(
+                        success=False,
+                        error=f"Excel 文件没有找到任何工作表: {file_path}"
+                    )
 
             # 验证请求的工作表索引/名称
             target_sheet = None
@@ -88,15 +91,21 @@ class XlsxParser(BaseParser):
                 target_sheet = sheet_names[0]
 
             # 读取 Excel 文件
-            df = pd.read_excel(
-                file_path,
-                sheet_name=target_sheet,
-                header=header_row,
-                **kwargs
-            )
+            df = None
+            try:
+                df = pd.read_excel(
+                    file_path,
+                    sheet_name=target_sheet,
+                    header=header_row,
+                    **kwargs
+                )
+            except Exception as e:
+                logger.warning(f"pandas 读取 Excel 失败，尝试 XML 方式: {e}")
+                # pandas 读取失败，尝试 XML 方式
+                df = self._read_excel_sheet_xml(file_path, sheet_name=target_sheet, header_row=header_row)
 
             # 检查 DataFrame 是否为空
-            if df.empty:
+            if df is None or df.empty:
                 return ParseResult(
                     success=False,
                     error=f"工作表 '{target_sheet}' 为空，请检查 Excel 文件内容"
@@ -211,7 +220,26 @@ class XlsxParser(BaseParser):
 
         try:
             # 读取所有工作表
-            all_data = pd.read_excel(file_path, sheet_name=None, **kwargs)
+            all_data = None
+            try:
+                all_data = pd.read_excel(file_path, sheet_name=None, **kwargs)
+            except Exception as e:
+                logger.warning(f"pandas 读取所有工作表失败: {e}")
+
+            # 如果 pandas 失败，尝试 XML 方式
+            if all_data is None or len(all_data) == 0:
+                sheet_names = self._extract_sheet_names_from_xml(file_path)
+                if not sheet_names:
+                    return ParseResult(
+                        success=False,
+                        error=f"无法读取 Excel 文件或文件为空: {file_path}"
+                    )
+                # 使用 XML 方式读取每个工作表
+                all_data = {}
+                for sheet_name in sheet_names:
+                    df = self._read_excel_sheet_xml(file_path, sheet_name=sheet_name, header_row=0)
+                    if df is not None and not df.empty:
+                        all_data[sheet_name] = df
 
             # 检查是否成功读取到数据
             if not all_data or len(all_data) == 0:
@@ -257,12 +285,148 @@ class XlsxParser(BaseParser):
         try:
             xls = pd.ExcelFile(file_path)
             sheet_names = xls.sheet_names
-            if not sheet_names:
-                return []
-            return sheet_names
+            if sheet_names:
+                return sheet_names
+            # pandas 返回空列表，尝试从 XML 提取
+            return self._extract_sheet_names_from_xml(file_path)
         except Exception as e:
             logger.error(f"获取工作表名称失败: {str(e)}")
+            # 尝试从 XML 提取
+            return self._extract_sheet_names_from_xml(file_path)
+
+    def _extract_sheet_names_from_xml(self, file_path: str) -> List[str]:
+        """
+        从 Excel 文件的 XML 中提取工作表名称
+
+        某些 Excel 文件由于包含非标准元素（如 mc:AlternateContent），
+        pandas/openpyxl 无法正确解析工作表列表，此时需要直接从 XML 中提取。
+
+        Args:
+            file_path: Excel 文件路径
+
+        Returns:
+            工作表名称列表
+        """
+        import zipfile
+        from xml.etree import ElementTree as ET
+
+        try:
+            with zipfile.ZipFile(file_path, 'r') as z:
+                if 'xl/workbook.xml' not in z.namelist():
+                    return []
+                content = z.read('xl/workbook.xml')
+                root = ET.fromstring(content)
+
+                # 命名空间
+                ns = {'main': 'http://schemas.openxmlformats.org/spreadsheetml/2006/main'}
+
+                sheet_names = []
+                for sheet in root.findall('.//main:sheet', ns):
+                    name = sheet.get('name')
+                    if name:
+                        sheet_names.append(name)
+
+                logger.info(f"从 XML 提取工作表: {sheet_names}")
+                return sheet_names
+        except Exception as e:
+            logger.error(f"从 XML 提取工作表名称失败: {e}")
             return []
+
+    def _read_excel_sheet_xml(self, file_path: str, sheet_name: str = None, header_row: int = 0) -> pd.DataFrame:
+        """
+        从 XML 直接读取 Excel 工作表数据
+
+        当 pandas 无法正确解析时使用此方法。
+
+        Args:
+            file_path: Excel 文件路径
+            sheet_name: 工作表名称（如果为 None，读取第一个工作表）
+            header_row: 表头行号（0-indexed）
+
+        Returns:
+            DataFrame
+        """
+        import zipfile
+        from xml.etree import ElementTree as ET
+
+        with zipfile.ZipFile(file_path, 'r') as z:
+            # 获取工作表名称
+            sheet_names = self._extract_sheet_names_from_xml(file_path)
+            if not sheet_names:
+                raise ValueError("无法从 Excel 文件中找到工作表")
+
+            # 确定要读取的工作表
+            target_sheet = sheet_name if sheet_name and sheet_name in sheet_names else sheet_names[0]
+            sheet_index = sheet_names.index(target_sheet) + 1  # sheet1.xml, sheet2.xml, ...
+
+            # 读取 shared strings
+            shared_strings = []
+            if 'xl/sharedStrings.xml' in z.namelist():
+                ss_content = z.read('xl/sharedStrings.xml')
+                ss_root = ET.fromstring(ss_content)
+                ns = {'main': 'http://schemas.openxmlformats.org/spreadsheetml/2006/main'}
+                for si in ss_root.findall('.//main:si', ns):
+                    t = si.find('.//main:t', ns)
+                    if t is not None:
+                        shared_strings.append(t.text or '')
+                    else:
+                        shared_strings.append('')
+
+            # 读取工作表
+            sheet_file = f'xl/worksheets/sheet{sheet_index}.xml'
+            if sheet_file not in z.namelist():
+                raise ValueError(f"工作表文件 {sheet_file} 不存在")
+
+            sheet_content = z.read(sheet_file)
+            root = ET.fromstring(sheet_content)
+            ns = {'main': 'http://schemas.openxmlformats.org/spreadsheetml/2006/main'}
+
+            # 收集所有行数据
+            all_rows = []
+            headers = {}
+
+            for row in root.findall('.//main:row', ns):
+                row_idx = int(row.get('r', 0))
+                row_cells = {}
+                for cell in row.findall('main:c', ns):
+                    cell_ref = cell.get('r', '')
+                    col_letters = ''.join(filter(str.isalpha, cell_ref))
+                    cell_type = cell.get('t', 'n')
+                    v = cell.find('main:v', ns)
+
+                    if v is not None and v.text:
+                        if cell_type == 's':
+                            # shared string
+                            try:
+                                row_cells[col_letters] = shared_strings[int(v.text)]
+                            except (ValueError, IndexError):
+                                row_cells[col_letters] = v.text
+                        elif cell_type == 'b':
+                            # boolean
+                            row_cells[col_letters] = v.text == '1'
+                        else:
+                            row_cells[col_letters] = v.text
+                    else:
+                        row_cells[col_letters] = None
+
+                # 处理表头行
+                if row_idx == header_row + 1:
+                    headers = {**row_cells}
+                elif row_idx > header_row + 1:
+                    all_rows.append(row_cells)
+
+            # 构建 DataFrame
+            if headers:
+                # 按原始列顺序排列
+                col_order = list(headers.keys())
+                df = pd.DataFrame(all_rows)
+                if not df.empty:
+                    df = df[col_order]
+                df.columns = [headers.get(col, col) for col in df.columns]
+            else:
+                df = pd.DataFrame(all_rows)
+
+            return df
 
     def _df_to_dict(self, df: pd.DataFrame) -> Dict[str, Any]:
         """

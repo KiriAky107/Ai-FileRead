@@ -91,6 +91,13 @@ const Documents: React.FC = () => {
   const [mdStreaming, setMdStreaming] = useState(false);
   const [mdStreamingContent, setMdStreamingContent] = useState('');
 
+  // RAG 向量检索相关状态
+  const [ragStatus, setRagStatus] = useState<{ vector_count: number; collections: string[] } | null>(null);
+  const [ragSearchQuery, setRagSearchQuery] = useState('');
+  const [ragSearching, setRagSearching] = useState(false);
+  const [ragResults, setRagResults] = useState<any[]>([]);
+  const [ragRebuilding, setRagRebuilding] = useState(false);
+
   // 解析选项
   const [parseOptions, setParseOptions] = useState({
     parseAllSheets: false,
@@ -145,6 +152,61 @@ const Documents: React.FC = () => {
   useEffect(() => {
     loadDocuments();
   }, [loadDocuments]);
+
+  // 获取 RAG 状态
+  useEffect(() => {
+    const fetchRagStatus = async () => {
+      try {
+        const status = await backendApi.getRAGStatus();
+        if (status.success) {
+          setRagStatus({ vector_count: status.vector_count, collections: status.collections });
+        }
+      } catch (err) {
+        console.error('获取 RAG 状态失败:', err);
+      }
+    };
+    fetchRagStatus();
+  }, []);
+
+  // RAG 搜索
+  const handleRagSearch = async () => {
+    if (!ragSearchQuery.trim()) {
+      toast.error('请输入搜索内容');
+      return;
+    }
+    setRagSearching(true);
+    setRagResults([]);
+    try {
+      const result = await backendApi.searchRAG(ragSearchQuery, 5);
+      if (result.success) {
+        setRagResults(result.results || []);
+      }
+    } catch (err: any) {
+      toast.error(err.message || '搜索失败');
+    } finally {
+      setRagSearching(false);
+    }
+  };
+
+  // 重建 RAG 索引
+  const handleRebuildRag = async () => {
+    setRagRebuilding(true);
+    try {
+      const result = await backendApi.rebuildRAGIndex();
+      if (result.success) {
+        toast.success(result.message || '索引重建成功');
+        // 刷新状态
+        const status = await backendApi.getRAGStatus();
+        if (status.success) {
+          setRagStatus({ vector_count: status.vector_count, collections: status.collections });
+        }
+      }
+    } catch (err: any) {
+      toast.error(err.message || '重建索引失败');
+    } finally {
+      setRagRebuilding(false);
+    }
+  };
 
   // 文件上传处理
   const onDrop = async (acceptedFiles: File[]) => {
@@ -688,7 +750,7 @@ const Documents: React.FC = () => {
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent>
-                      {analysisTypes.map(type => (
+                      {(analysisTypes || []).map(type => (
                         <SelectItem key={type.value} value={type.value}>
                           <div className="flex items-center gap-2">
                             {getAnalysisIcon(type.value)}
@@ -851,9 +913,9 @@ const Documents: React.FC = () => {
                 </div>
               </CardHeader>
               <CardContent className="max-h-[400px] overflow-y-auto">
-                {aiAnalysis.analysis?.sheets ? (
+                {aiAnalysis.analysis?.sheets && typeof aiAnalysis.analysis.sheets === 'object' ? (
                   <div className="space-y-4">
-                    {Object.entries(aiAnalysis.analysis.sheets).map(([sheetName, result]: [string, any]) => (
+                    {Object.entries(aiAnalysis.analysis.sheets || {}).map(([sheetName, result]: [string, any]) => (
                       <div key={sheetName} className="p-4 bg-muted/30 rounded-xl">
                         <div className="flex items-center gap-2 mb-2">
                           <FileSpreadsheet size={16} className="text-primary" />
@@ -940,7 +1002,7 @@ const Documents: React.FC = () => {
                       <Table className="text-primary" size={20} />
                       数据预览
                     </CardTitle>
-                    <CardDescription>{parseResult.data.sheets ? '所有工作表数据' : '工作表数据'}</CardDescription>
+                    <CardDescription>{parseResult?.data?.sheets ? '所有工作表数据' : '工作表数据'}</CardDescription>
                   </div>
                   <Button variant="outline" size="sm" onClick={openExportDialog} className="gap-2">
                     <Download size={14} />导出
@@ -948,9 +1010,9 @@ const Documents: React.FC = () => {
                 </div>
               </CardHeader>
               <CardContent>
-                {parseResult.data.sheets ? (
+                {parseResult?.data?.sheets && typeof parseResult.data.sheets === 'object' ? (
                   <div className="space-y-4">
-                    {Object.entries(parseResult.data.sheets).map(([sheetName, sheetData]: [string, any]) => (
+                    {Object.entries(parseResult.data.sheets || {}).map(([sheetName, sheetData]: [string, any]) => (
                       <div key={sheetName} className="border rounded-xl overflow-hidden">
                         <button
                           onClick={() => setExpandedSheet(expandedSheet === sheetName ? null : sheetName)}
@@ -972,11 +1034,88 @@ const Documents: React.FC = () => {
                     ))}
                   </div>
                 ) : (
-                  <DataTable columns={parseResult.data.columns || []} rows={parseResult.data.rows || []} />
+                  <DataTable columns={parseResult?.data?.columns || []} rows={parseResult?.data?.rows || []} />
                 )}
               </CardContent>
             </Card>
           )}
+
+          {/* RAG 向量检索 */}
+          <Card className="border-none shadow-md bg-gradient-to-br from-violet-500/5 to-cyan-500/5">
+            <CardHeader className="pb-4">
+              <div className="flex items-center justify-between">
+                <div className="space-y-1">
+                  <CardTitle className="flex items-center gap-2">
+                    <Brain className="text-violet-500" size={20} />
+                    RAG 向量检索
+                  </CardTitle>
+                  <CardDescription>
+                    向量索引: {(ragStatus?.vector_count) || 0} 条
+                    {ragStatus?.collections && ragStatus.collections.length > 0 && ` | 集合: ${ragStatus.collections.join(', ')}`}
+                  </CardDescription>
+                </div>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={handleRebuildRag}
+                  disabled={ragRebuilding}
+                >
+                  {ragRebuilding ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <RefreshCcw className="mr-2 h-4 w-4" />}
+                  重建索引
+                </Button>
+              </div>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              {/* 搜索框 */}
+              <div className="flex gap-2">
+                <Input
+                  placeholder="输入查询内容，例如：查询去年销售额最高的客户..."
+                  value={ragSearchQuery}
+                  onChange={(e) => setRagSearchQuery(e.target.value)}
+                  onKeyDown={(e) => e.key === 'Enter' && handleRagSearch()}
+                  className="flex-1"
+                />
+                <Button onClick={handleRagSearch} disabled={ragSearching}>
+                  {ragSearching ? <Loader2 className="h-4 w-4 animate-spin" /> : <Search className="h-4 w-4" />}
+                </Button>
+              </div>
+              {/* 搜索结果 */}
+              {(ragResults?.length ?? 0) > 0 && (
+                <div className="space-y-3">
+                  <Label className="text-sm font-medium">检索结果</Label>
+                  {(ragResults || []).map((result, index) => (
+                    <div key={index} className="p-4 rounded-xl border bg-card hover:bg-muted/30 transition-colors">
+                      <div className="flex items-start justify-between gap-2 mb-2">
+                        <Badge variant="outline" className="text-xs">
+                          相似度: {(result.score * 100).toFixed(1)}%
+                        </Badge>
+                        {result.metadata?.table_name && (
+                          <Badge variant="secondary" className="text-xs">
+                            {result.metadata.table_name}
+                          </Badge>
+                        )}
+                      </div>
+                      <p className="text-sm whitespace-pre-wrap">{result.content}</p>
+                      {result.metadata && (
+                        <div className="flex gap-2 mt-2 flex-wrap">
+                          {result.metadata.field_name && (
+                            <span className="text-xs text-muted-foreground">
+                              字段: {result.metadata.field_name}
+                            </span>
+                          )}
+                          {result.metadata.filename && (
+                            <span className="text-xs text-muted-foreground">
+                              文件: {result.metadata.filename}
+                            </span>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </CardContent>
+          </Card>
 
           {/* 文档列表 */}
           <Card className="border-none shadow-md">
@@ -1002,9 +1141,9 @@ const Documents: React.FC = () => {
               {/* 文档列表 */}
               {loading ? (
                 <div className="space-y-3">{[1, 2, 3].map(i => <Skeleton key={i} className="h-16 w-full rounded-xl" />)}</div>
-              ) : filteredDocs.length > 0 ? (
+              ) : (filteredDocs?.length ?? 0) > 0 ? (
                 <div className="space-y-3">
-                  {filteredDocs.map(doc => (
+                  {(filteredDocs || []).map(doc => (
                     <div key={doc.doc_id} className="flex items-center gap-4 p-4 rounded-xl border border-transparent hover:bg-muted/30 transition-all group">
                       <div className={cn(
                         "w-10 h-10 rounded-lg flex items-center justify-center shrink-0",

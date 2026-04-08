@@ -563,6 +563,30 @@ export const backendApi = {
     }
   },
 
+  /**
+   * 重建 RAG 索引
+   */
+  async rebuildRAGIndex(): Promise<{
+    success: boolean;
+    message: string;
+  }> {
+    const url = `${BACKEND_BASE_URL}/rag/rebuild`;
+
+    try {
+      const response = await fetch(url, {
+        method: 'POST',
+      });
+      if (!response.ok) {
+        const error = await response.json();
+        throw new Error(error.detail || '重建索引失败');
+      }
+      return await response.json();
+    } catch (error) {
+      console.error('重建 RAG 索引失败:', error);
+      throw error;
+    }
+  },
+
   // ==================== 表格填写 ====================
 
   /**
