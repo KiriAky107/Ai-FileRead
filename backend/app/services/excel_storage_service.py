@@ -45,8 +45,25 @@ class ExcelStorageService:
                     return []
                 content = z.read('xl/workbook.xml')
                 root = ET.fromstring(content)
-                ns = {'main': 'http://purl.oclc.org/ooxml/spreadsheetml/main'}
-                sheets = root.findall('.//main:sheet', ns)
+
+                # 尝试多种命名空间
+                namespaces = [
+                    'http://schemas.openxmlformats.org/spreadsheetml/2006/main',
+                    'http://purl.oclc.org/ooxml/spreadsheetml/main',
+                ]
+
+                for ns_uri in namespaces:
+                    ns = {'main': ns_uri}
+                    sheets = root.findall('.//main:sheet', ns)
+                    if sheets:
+                        names = [s.get('name') for s in sheets if s.get('name')]
+                        if names:
+                            return names
+
+                # 尝试通配符
+                sheets = root.findall('.//{*}sheet')
+                if not sheets:
+                    sheets = root.findall('.//sheet')
                 return [s.get('name') for s in sheets if s.get('name')]
         except Exception:
             return []
@@ -79,72 +96,77 @@ class ExcelStorageService:
                 if 'xl/sharedStrings.xml' in z.namelist():
                     ss_content = z.read('xl/sharedStrings.xml')
                     ss_root = ET.fromstring(ss_content)
-                    ns = {'main': 'http://purl.oclc.org/ooxml/spreadsheetml/main'}
-                    for si in ss_root.findall('.//main:si', ns):
-                        t = si.find('.//main:t', ns)
-                        shared_strings.append(t.text if t is not None else '')
+                    for si in ss_root.iter():
+                        if si.tag.endswith('}si') or si.tag == 'si':
+                            t = si.find('.//{*}t')
+                            shared_strings.append(t.text if t is not None and t.text else '')
 
                 sheet_file = f'xl/worksheets/sheet{sheet_index}.xml'
                 sheet_content = z.read(sheet_file)
                 root = ET.fromstring(sheet_content)
-                ns = {'main': 'http://purl.oclc.org/ooxml/spreadsheetml/main'}
 
                 rows_data = []
-                for row in root.findall('.//main:row', ns):
-                    row_idx = int(row.get('r', 0))
-                    if row_idx <= header_row + 1:
-                        continue
+                headers = {}
 
-                    row_cells = {}
-                    for cell in row.findall('main:c', ns):
-                        cell_ref = cell.get('r', '')
-                        col_letters = ''.join(filter(str.isalpha, cell_ref))
-                        cell_type = cell.get('t', 'n')
-                        v = cell.find('main:v', ns)
+                for row in root.iter():
+                    if row.tag.endswith('}row') or row.tag == 'row':
+                        row_idx = int(row.get('r', 0))
 
-                        if v is not None and v.text:
-                            if cell_type == 's':
-                                try:
-                                    val = shared_strings[int(v.text)]
-                                except (ValueError, IndexError):
-                                    val = v.text
-                            elif cell_type == 'b':
-                                val = v.text == '1'
-                            else:
-                                val = v.text
-                        else:
-                            val = None
-                        row_cells[col_letters] = val
+                        # 收集表头行
+                        if row_idx == header_row + 1:
+                            for cell in row:
+                                if cell.tag.endswith('}c') or cell.tag == 'c':
+                                    cell_ref = cell.get('r', '')
+                                    col_letters = ''.join(filter(str.isalpha, cell_ref))
+                                    cell_type = cell.get('t', 'n')
+                                    v = cell.find('{*}v')
+                                    if v is not None and v.text:
+                                        if cell_type == 's':
+                                            try:
+                                                headers[col_letters] = shared_strings[int(v.text)]
+                                            except (ValueError, IndexError):
+                                                headers[col_letters] = v.text
+                                        else:
+                                            headers[col_letters] = v.text
+                                    else:
+                                        headers[col_letters] = col_letters
+                            continue
 
-                    if row_cells:
-                        rows_data.append(row_cells)
+                        if row_idx <= header_row + 1:
+                            continue
+
+                        row_cells = {}
+                        for cell in row:
+                            if cell.tag.endswith('}c') or cell.tag == 'c':
+                                cell_ref = cell.get('r', '')
+                                col_letters = ''.join(filter(str.isalpha, cell_ref))
+                                cell_type = cell.get('t', 'n')
+                                v = cell.find('{*}v')
+
+                                if v is not None and v.text:
+                                    if cell_type == 's':
+                                        try:
+                                            val = shared_strings[int(v.text)]
+                                        except (ValueError, IndexError):
+                                            val = v.text
+                                    elif cell_type == 'b':
+                                        val = v.text == '1'
+                                    else:
+                                        val = v.text
+                                else:
+                                    val = None
+                                row_cells[col_letters] = val
+
+                        if row_cells:
+                            rows_data.append(row_cells)
 
                 if not rows_data:
                     return pd.DataFrame()
 
                 df = pd.DataFrame(rows_data)
 
-                if header_row >= 0:
-                    first_row_sheet = f'xl/worksheets/sheet{sheet_index}.xml'
-                    sheet_content = z.read(first_row_sheet)
-                    root = ET.fromstring(sheet_content)
-                    first_row = root.find(f'.//main:row[@r="{header_row + 1}"]', ns)
-                    if first_row is not None:
-                        headers = {}
-                        for cell in first_row.findall('main:c', ns):
-                            cell_ref = cell.get('r', '')
-                            col_letters = ''.join(filter(str.isalpha, cell_ref))
-                            cell_type = cell.get('t', 'n')
-                            v = cell.find('main:v', ns)
-                            if v is not None and v.text:
-                                if cell_type == 's':
-                                    try:
-                                        headers[col_letters] = shared_strings[int(v.text)]
-                                    except (ValueError, IndexError):
-                                        headers[col_letters] = v.text
-                                else:
-                                    headers[col_letters] = v.text
-                        df.columns = [headers.get(col, col) for col in df.columns]
+                if headers:
+                    df.columns = [headers.get(col, col) for col in df.columns]
 
                 return df
         except Exception as e:
