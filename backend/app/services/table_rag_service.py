@@ -30,6 +30,9 @@ class TableRAGService:
         self.llm = llm_service
         self.rag = rag_service
         self.excel_storage = excel_storage_service
+        # 临时禁用 RAG 索引构建
+        self._disabled = True
+        logger.info("TableRAG 服务已禁用（_disabled=True），仅记录索引操作日志")
 
     def _extract_sheet_names_from_xml(self, file_path: str) -> List[str]:
         """
@@ -389,13 +392,16 @@ class TableRAGService:
                         all_fields=all_fields_data
                     )
 
-                    # 存入 RAG
-                    self.rag.index_field(
-                        table_name=table_name,
-                        field_name=col,
-                        field_description=description,
-                        sample_values=[str(v) for v in sample_values[:5]]
-                    )
+                    # 存入 RAG（如果未禁用）
+                    if self._disabled:
+                        logger.info(f"[RAG DISABLED] 字段索引已跳过: {table_name}.{col}")
+                    else:
+                        self.rag.index_field(
+                            table_name=table_name,
+                            field_name=col,
+                            field_description=description,
+                            sample_values=[str(v) for v in sample_values[:5]]
+                        )
 
                     indexed_count += 1
                     results["indexed_fields"].append({
@@ -526,13 +532,16 @@ class TableRAGService:
                         all_fields=all_fields_data
                     )
 
-                    # 存入 RAG
-                    self.rag.index_field(
-                        table_name=table_name,
-                        field_name=col,
-                        field_description=description,
-                        sample_values=[str(v) for v in col_values[:5]]
-                    )
+                    # 存入 RAG（如果未禁用）
+                    if self._disabled:
+                        logger.info(f"[RAG DISABLED] 文档表格字段索引已跳过: {table_name}.{col}")
+                    else:
+                        self.rag.index_field(
+                            table_name=table_name,
+                            field_name=col,
+                            field_description=description,
+                            sample_values=[str(v) for v in col_values[:5]]
+                        )
 
                     indexed_count += 1
                     results["indexed_fields"].append({

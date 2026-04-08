@@ -36,9 +36,15 @@ class RAGService:
         self._dimension: int = 0
         self._initialized = False
         self._persist_dir = settings.FAISS_INDEX_DIR
+        # 临时禁用 RAG API 调用，仅记录日志
+        self._disabled = True
+        logger.info("RAG 服务已禁用（_disabled=True），仅记录索引操作日志")
 
     def _init_embeddings(self):
         """初始化嵌入模型"""
+        if self._disabled:
+            logger.debug("RAG 已禁用，跳过嵌入模型初始化")
+            return
         if self.embedding_model is None:
             # 使用轻量级本地模型，避免网络问题
             model_name = 'all-MiniLM-L6-v2'
@@ -90,6 +96,10 @@ class RAGService:
         sample_values: Optional[List[str]] = None
     ):
         """将字段信息索引到向量数据库"""
+        if self._disabled:
+            logger.info(f"[RAG DISABLED] 字段索引操作已跳过: {table_name}.{field_name}")
+            return
+
         if not self._initialized:
             self._init_vector_store()
 
@@ -117,6 +127,10 @@ class RAGService:
         metadata: Optional[Dict[str, Any]] = None
     ):
         """将文档内容索引到向量数据库"""
+        if self._disabled:
+            logger.info(f"[RAG DISABLED] 文档索引操作已跳过: {doc_id}")
+            return
+
         if not self._initialized:
             self._init_vector_store()
 
@@ -154,6 +168,10 @@ class RAGService:
 
     def retrieve(self, query: str, top_k: int = 5) -> List[Dict[str, Any]]:
         """根据查询检索相关文档"""
+        if self._disabled:
+            logger.info(f"[RAG DISABLED] 检索操作已跳过: query={query}, top_k={top_k}")
+            return []
+
         if not self._initialized:
             self._init_vector_store()
 
@@ -186,6 +204,9 @@ class RAGService:
 
     def get_vector_count(self) -> int:
         """获取向量总数"""
+        if self._disabled:
+            logger.info("[RAG DISABLED] get_vector_count 返回 0")
+            return 0
         if self.index is None:
             return 0
         return self.index.ntotal
@@ -243,6 +264,9 @@ class RAGService:
 
     def clear(self):
         """清空所有索引"""
+        if self._disabled:
+            logger.info("[RAG DISABLED] clear 操作已跳过")
+            return
         self._init_vector_store()
         if self.index is not None:
             self.index.reset()
