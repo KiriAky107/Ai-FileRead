@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { useDropzone } from 'react-dropzone';
 import {
   TableProperties,
@@ -18,7 +18,8 @@ import {
   Files,
   Trash2,
   Eye,
-  File
+  File,
+  Plus
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
@@ -72,6 +73,7 @@ const TemplateFill: React.FC = () => {
   const [sourceMode, setSourceMode] = useState<'upload' | 'select'>('upload');
   const [uploadedDocuments, setUploadedDocuments] = useState<DocumentItem[]>([]);
   const [docsLoading, setDocsLoading] = useState(false);
+  const sourceFileInputRef = useRef<HTMLInputElement>(null);
 
   // 模板拖拽
   const onTemplateDrop = useCallback((acceptedFiles: File[]) => {
@@ -93,25 +95,34 @@ const TemplateFill: React.FC = () => {
   });
 
   // 源文档拖拽
-  const onSourceDrop = useCallback((acceptedFiles: File[]) => {
-    const newFiles = acceptedFiles.map(f => ({
-      file: f,
-      preview: f.type.startsWith('text/') || f.name.endsWith('.md') ? undefined : undefined
-    }));
-    addSourceFiles(newFiles);
+  const onSourceDrop = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    const files = Array.from(e.dataTransfer.files).filter(f => {
+      const ext = f.name.split('.').pop()?.toLowerCase();
+      return ['xlsx', 'xls', 'docx', 'md', 'txt'].includes(ext || '');
+    });
+    if (files.length > 0) {
+      addSourceFiles(files.map(f => ({ file: f })));
+    }
   }, [addSourceFiles]);
 
-  const { getRootProps: getSourceProps, getInputProps: getSourceInputProps, isDragActive: isSourceDragActive } = useDropzone({
-    onDrop: onSourceDrop,
-    accept: {
-      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': ['.xlsx'],
-      'application/vnd.ms-excel': ['.xls'],
-      'application/vnd.openxmlformats-officedocument.wordprocessingml.document': ['.docx'],
-      'text/plain': ['.txt'],
-      'text/markdown': ['.md']
-    },
-    multiple: true
-  });
+  const handleSourceFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(e.target.files || []);
+    if (files.length > 0) {
+      addSourceFiles(files.map(f => ({ file: f })));
+      toast.success(`已添加 ${files.length} 个文件`);
+    }
+    e.target.value = '';
+  };
+
+  // 仅添加源文档不上传
+  const handleAddSourceFiles = () => {
+    if (sourceFiles.length === 0) {
+      toast.error('请先选择源文档');
+      return;
+    }
+    toast.success(`已添加 ${sourceFiles.length} 个源文档，可继续添加更多`);
+  };
 
   // 加载已上传文档
   const loadUploadedDocuments = useCallback(async () => {
@@ -371,23 +382,33 @@ const TemplateFill: React.FC = () => {
             <CardContent>
               {sourceMode === 'upload' ? (
                 <>
+                  <div className="border-2 border-dashed rounded-2xl p-8 transition-all duration-300 flex flex-col items-center justify-center text-center cursor-pointer group min-h-[200px] border-muted-foreground/20 hover:border-primary/50 hover:bg-primary/5">
+                    <input
+                      id="source-file-input"
+                      type="file"
+                      multiple={true}
+                      accept=".xlsx,.xls,.docx,.md,.txt"
+                      onChange={handleSourceFileSelect}
+                      className="hidden"
+                    />
+                    <label htmlFor="source-file-input" className="cursor-pointer flex flex-col items-center">
+                      <div className="w-14 h-14 rounded-xl bg-blue-500/10 text-blue-500 flex items-center justify-center mb-4 group-hover:scale-110 transition-transform">
+                        {loading ? <Loader2 className="animate-spin" size={28} /> : <Upload size={28} />}
+                      </div>
+                      <p className="font-medium">
+                        点击上传源文档
+                      </p>
+                      <p className="text-xs text-muted-foreground mt-1">
+                        支持 .xlsx .xls .docx .md .txt
+                      </p>
+                    </label>
+                  </div>
                   <div
-                    {...getSourceProps()}
-                    className={cn(
-                      "border-2 border-dashed rounded-2xl p-8 transition-all duration-300 flex flex-col items-center justify-center text-center cursor-pointer group min-h-[200px]",
-                      isSourceDragActive ? "border-primary bg-primary/5" : "border-muted-foreground/20 hover:border-primary/50 hover:bg-primary/5"
-                    )}
+                    onDragOver={(e) => { e.preventDefault(); }}
+                    onDrop={onSourceDrop}
+                    className="mt-2 text-center text-xs text-muted-foreground"
                   >
-                    <input {...getSourceInputProps()} />
-                    <div className="w-14 h-14 rounded-xl bg-blue-500/10 text-blue-500 flex items-center justify-center mb-4 group-hover:scale-110 transition-transform">
-                      {loading ? <Loader2 className="animate-spin" size={28} /> : <Upload size={28} />}
-                    </div>
-                    <p className="font-medium">
-                      {isSourceDragActive ? '释放以上传' : '点击或拖拽上传源文档'}
-                    </p>
-                    <p className="text-xs text-muted-foreground mt-1">
-                      支持 .xlsx .xls .docx .md .txt
-                    </p>
+                    或拖拽文件到此处
                   </div>
 
                   {/* Selected Source Files */}
@@ -407,6 +428,12 @@ const TemplateFill: React.FC = () => {
                           </Button>
                         </div>
                       ))}
+                      <div className="flex justify-center pt-2">
+                        <Button variant="outline" size="sm" onClick={() => document.getElementById('source-file-input')?.click()}>
+                          <Plus size={14} className="mr-1" />
+                          继续添加更多文档
+                        </Button>
+                      </div>
                     </div>
                   )}
                 </>
@@ -420,49 +447,60 @@ const TemplateFill: React.FC = () => {
                       ))}
                     </div>
                   ) : uploadedDocuments.length > 0 ? (
-                    <div className="space-y-2 max-h-[300px] overflow-y-auto">
-                      {uploadedDocuments.map((doc) => (
-                        <div
-                          key={doc.doc_id}
-                          className={cn(
-                            "flex items-center gap-3 p-3 rounded-xl border-2 transition-all cursor-pointer",
-                            sourceDocIds.includes(doc.doc_id)
-                              ? "border-primary bg-primary/5"
-                              : "border-border hover:bg-muted/30"
-                          )}
-                          onClick={() => {
-                            if (sourceDocIds.includes(doc.doc_id)) {
-                              removeSourceDocId(doc.doc_id);
-                            } else {
-                              addSourceDocId(doc.doc_id);
-                            }
-                          }}
-                        >
-                          <div className={cn(
-                            "w-6 h-6 rounded-md border-2 flex items-center justify-center transition-all shrink-0",
-                            sourceDocIds.includes(doc.doc_id)
-                              ? "border-primary bg-primary text-white"
-                              : "border-muted-foreground/30"
-                          )}>
-                            {sourceDocIds.includes(doc.doc_id) && <CheckCircle2 size={14} />}
-                          </div>
-                          {getFileIcon(doc.original_filename)}
-                          <div className="flex-1 min-w-0">
-                            <p className="text-sm font-medium truncate">{doc.original_filename}</p>
-                            <p className="text-xs text-muted-foreground">
-                              {doc.doc_type.toUpperCase()} • {format(new Date(doc.created_at), 'yyyy-MM-dd')}
-                            </p>
-                          </div>
-                          <Button
-                            variant="ghost"
-                            size="sm"
-                            onClick={(e) => handleDeleteDocument(doc.doc_id, e)}
-                            className="shrink-0"
-                          >
-                            <Trash2 size={14} className="text-red-500" />
+                    <div className="space-y-2">
+                      {sourceDocIds.length > 0 && (
+                        <div className="flex items-center justify-between p-3 bg-primary/5 rounded-xl border border-primary/20">
+                          <span className="text-sm font-medium">已选择 {sourceDocIds.length} 个文档</span>
+                          <Button variant="ghost" size="sm" onClick={() => loadUploadedDocuments()}>
+                            <RefreshCcw size={14} className="mr-1" />
+                            刷新列表
                           </Button>
                         </div>
-                      ))}
+                      )}
+                      <div className="max-h-[300px] overflow-y-auto space-y-2">
+                        {uploadedDocuments.map((doc) => (
+                          <div
+                            key={doc.doc_id}
+                            className={cn(
+                              "flex items-center gap-3 p-3 rounded-xl border-2 transition-all cursor-pointer",
+                              sourceDocIds.includes(doc.doc_id)
+                                ? "border-primary bg-primary/5"
+                                : "border-border hover:bg-muted/30"
+                            )}
+                            onClick={() => {
+                              if (sourceDocIds.includes(doc.doc_id)) {
+                                removeSourceDocId(doc.doc_id);
+                              } else {
+                                addSourceDocId(doc.doc_id);
+                              }
+                            }}
+                          >
+                            <div className={cn(
+                              "w-6 h-6 rounded-md border-2 flex items-center justify-center transition-all shrink-0",
+                              sourceDocIds.includes(doc.doc_id)
+                                ? "border-primary bg-primary text-white"
+                                : "border-muted-foreground/30"
+                            )}>
+                              {sourceDocIds.includes(doc.doc_id) && <CheckCircle2 size={14} />}
+                            </div>
+                            {getFileIcon(doc.original_filename)}
+                            <div className="flex-1 min-w-0">
+                              <p className="text-sm font-medium truncate">{doc.original_filename}</p>
+                              <p className="text-xs text-muted-foreground">
+                                {doc.doc_type.toUpperCase()} • {format(new Date(doc.created_at), 'yyyy-MM-dd')}
+                              </p>
+                            </div>
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              onClick={(e) => handleDeleteDocument(doc.doc_id, e)}
+                              className="shrink-0"
+                            >
+                              <Trash2 size={14} className="text-red-500" />
+                            </Button>
+                          </div>
+                        ))}
+                      </div>
                     </div>
                   ) : (
                     <div className="text-center py-8 text-muted-foreground">
