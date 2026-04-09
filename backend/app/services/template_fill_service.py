@@ -757,9 +757,51 @@ class TemplateFillService:
                 val = row[columns.index(target_col)]
             else:
                 val = ""
-            values.append(str(val) if val is not None else "")
+            values.append(self._format_value(val))
 
         return values
+
+    def _format_value(self, val: Any) -> str:
+        """
+        格式化值为字符串，保持原始格式
+
+        - 如果是浮点数但实际上等于整数，返回整数格式（如 3.0 -> "3"）
+        - 如果是浮点数且有小数部分，保留小数（如 3.5 -> "3.5"）
+        - 如果是整数，直接返回（如 3 -> "3"）
+        - 其他类型直接转为字符串
+
+        Args:
+            val: 原始值
+
+        Returns:
+            格式化后的字符串
+        """
+        if val is None:
+            return ""
+
+        # 如果已经是字符串
+        if isinstance(val, str):
+            return val.strip()
+
+        # 如果是布尔值
+        if isinstance(val, bool):
+            return "true" if val else "false"
+
+        # 如果是数字
+        if isinstance(val, (int, float)):
+            # 检查是否是浮点数但等于整数
+            if isinstance(val, float):
+                # 检查是否是小数部分为0
+                if val == int(val):
+                    return str(int(val))
+                else:
+                    # 去除尾部多余的0，但保留必要的小数位
+                    formatted = f"{val:.10f}".rstrip('0').rstrip('.')
+                    return formatted
+            else:
+                return str(val)
+
+        return str(val)
 
     def _extract_values_from_json(self, result) -> List[str]:
         """
@@ -774,12 +816,12 @@ class TemplateFillService:
         if isinstance(result, dict):
             # 优先找 values 数组
             if "values" in result and isinstance(result["values"], list):
-                vals = [str(v).strip() for v in result["values"] if v and str(v).strip()]
+                vals = [self._format_value(v).strip() for v in result["values"] if self._format_value(v).strip()]
                 if vals:
                     return vals
             # 尝试找 value 字段
             if "value" in result:
-                val = str(result["value"]).strip()
+                val = self._format_value(result["value"]).strip()
                 if val:
                     return [val]
             # 尝试找任何数组类型的键
@@ -787,13 +829,13 @@ class TemplateFillService:
                 val = result[key]
                 if isinstance(val, list) and len(val) > 0:
                     if all(isinstance(v, (str, int, float, bool)) or v is None for v in val):
-                        vals = [str(v).strip() for v in val if v is not None and str(v).strip()]
+                        vals = [self._format_value(v).strip() for v in val if v is not None and self._format_value(v).strip()]
                         if vals:
                             return vals
                 elif isinstance(val, (str, int, float, bool)):
-                    return [str(val).strip()]
+                    return [self._format_value(val).strip()]
         elif isinstance(result, list):
-            vals = [str(v).strip() for v in result if v is not None and str(v).strip()]
+            vals = [self._format_value(v).strip() for v in result if v is not None and self._format_value(v).strip()]
             if vals:
                 return vals
         return []
@@ -930,15 +972,15 @@ class TemplateFillService:
             if isinstance(parsed, dict):
                 # 如果是 {"values": [...]} 格式，提取 values
                 if "values" in parsed and isinstance(parsed["values"], list):
-                    return [str(v).strip() for v in parsed["values"] if v and str(v).strip()]
+                    return [self._format_value(v).strip() for v in parsed["values"] if self._format_value(v).strip()]
                 # 如果是其他 dict 格式，尝试找 values 键
                 for key in ["values", "value", "data", "result"]:
                     if key in parsed and isinstance(parsed[key], list):
-                        return [str(v).strip() for v in parsed[key] if v and str(v).strip()]
+                        return [self._format_value(v).strip() for v in parsed[key] if self._format_value(v).strip()]
                     elif key in parsed:
-                        return [str(parsed[key]).strip()]
+                        return [self._format_value(parsed[key]).strip()]
             elif isinstance(parsed, list):
-                return [str(v).strip() for v in parsed if v and str(v).strip()]
+                return [self._format_value(v).strip() for v in parsed if self._format_value(v).strip()]
         except (json.JSONDecodeError, TypeError):
             pass
 
@@ -954,14 +996,14 @@ class TemplateFillService:
                         result = []
                         for item in arr:
                             if isinstance(item, dict) and "values" in item and isinstance(item["values"], list):
-                                result.extend([str(v).strip() for v in item["values"] if v and str(v).strip()])
+                                result.extend([self._format_value(v).strip() for v in item["values"] if self._format_value(v).strip()])
                             elif isinstance(item, dict):
                                 result.append(str(item))
                             else:
-                                result.append(str(item))
+                                result.append(self._format_value(item))
                         if result:
                             return result
-                    return [str(v).strip() for v in arr if v and str(v).strip()]
+                    return [self._format_value(v).strip() for v in arr if self._format_value(v).strip()]
             except:
                 pass
 
