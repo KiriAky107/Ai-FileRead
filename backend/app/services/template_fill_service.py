@@ -62,7 +62,8 @@ class TemplateFillService:
         source_file_paths: Optional[List[str]] = None,
         user_hint: Optional[str] = None,
         template_id: Optional[str] = None,
-        template_file_type: Optional[str] = "xlsx"
+        template_file_type: Optional[str] = "xlsx",
+        task_id: Optional[str] = None
     ) -> Dict[str, Any]:
         """
         填写表格模板
@@ -74,6 +75,7 @@ class TemplateFillService:
             user_hint: 用户提示（如"请从合同文档中提取"）
             template_id: 模板文件路径（用于重新生成表头）
             template_file_type: 模板文件类型
+            task_id: 可选的任务ID，用于任务进度跟踪
 
         Returns:
             填写结果
