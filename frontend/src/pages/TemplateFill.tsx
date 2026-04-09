@@ -37,6 +37,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { ScrollArea } from '@/components/ui/scroll-area';
+import { useTemplateFill } from '@/context/TemplateFillContext';
 
 type DocumentItem = {
   doc_id: string;
@@ -52,29 +53,19 @@ type DocumentItem = {
   };
 };
 
-type SourceFile = {
-  file: File;
-  preview?: string;
-};
-
-type TemplateField = {
-  cell: string;
-  name: string;
-  field_type: string;
-  required: boolean;
-  hint?: string;
-};
-
 const TemplateFill: React.FC = () => {
-  const [step, setStep] = useState<'upload' | 'filling' | 'preview'>('upload');
-  const [templateFile, setTemplateFile] = useState<File | null>(null);
-  const [templateFields, setTemplateFields] = useState<TemplateField[]>([]);
-  const [sourceFiles, setSourceFiles] = useState<SourceFile[]>([]);
-  const [sourceFilePaths, setSourceFilePaths] = useState<string[]>([]);
-  const [templateId, setTemplateId] = useState<string>('');
+  const {
+    step, setStep,
+    templateFile, setTemplateFile,
+    templateFields, setTemplateFields,
+    sourceFiles, setSourceFiles, addSourceFiles, removeSourceFile,
+    sourceFilePaths, setSourceFilePaths,
+    templateId, setTemplateId,
+    filledResult, setFilledResult,
+    reset
+  } = useTemplateFill();
+
   const [loading, setLoading] = useState(false);
-  const [filling, setFilling] = useState(false);
-  const [filledResult, setFilledResult] = useState<any>(null);
   const [previewDoc, setPreviewDoc] = useState<{ name: string; content: string } | null>(null);
   const [previewOpen, setPreviewOpen] = useState(false);
 
@@ -103,8 +94,8 @@ const TemplateFill: React.FC = () => {
       file: f,
       preview: f.type.startsWith('text/') || f.name.endsWith('.md') ? undefined : undefined
     }));
-    setSourceFiles(prev => [...prev, ...newFiles]);
-  }, []);
+    addSourceFiles(newFiles);
+  }, [addSourceFiles]);
 
   const { getRootProps: getSourceProps, getInputProps: getSourceInputProps, isDragActive: isSourceDragActive } = useDropzone({
     onDrop: onSourceDrop,
@@ -117,10 +108,6 @@ const TemplateFill: React.FC = () => {
     },
     multiple: true
   });
-
-  const removeSourceFile = (index: number) => {
-    setSourceFiles(prev => prev.filter((_, i) => i !== index));
-  };
 
   const handleJointUploadAndFill = async () => {
     if (!templateFile) {
@@ -164,40 +151,6 @@ const TemplateFill: React.FC = () => {
     }
   };
 
-  // 传统方式：先上传源文档再填表（兼容已有文档库的场景）
-  const handleFillWithExistingDocs = async (selectedDocIds: string[]) => {
-    if (!templateFile || selectedDocIds.length === 0) {
-      toast.error('请选择数据源文档');
-      return;
-    }
-
-    setLoading(true);
-    setStep('filling');
-
-    try {
-      // 先上传模板获取template_id
-      const uploadResult = await backendApi.uploadTemplate(templateFile);
-
-      const fillResult = await backendApi.fillTemplate(
-        uploadResult.template_id,
-        uploadResult.fields || [],
-        selectedDocIds,
-        [],
-        '请从以下文档中提取相关信息填写表格'
-      );
-
-      setTemplateFields(uploadResult.fields || []);
-      setTemplateId(uploadResult.template_id);
-      setFilledResult(fillResult);
-      setStep('preview');
-      toast.success('表格填写完成');
-    } catch (err: any) {
-      toast.error('填表失败: ' + (err.message || '未知错误'));
-    } finally {
-      setLoading(false);
-    }
-  };
-
   const handleExport = async () => {
     if (!templateFile || !filledResult) return;
 
@@ -217,16 +170,6 @@ const TemplateFill: React.FC = () => {
     } catch (err: any) {
       toast.error('导出失败: ' + (err.message || '未知错误'));
     }
-  };
-
-  const resetFlow = () => {
-    setStep('upload');
-    setTemplateFile(null);
-    setTemplateFields([]);
-    setSourceFiles([]);
-    setSourceFilePaths([]);
-    setTemplateId('');
-    setFilledResult(null);
   };
 
   const getFileIcon = (filename: string) => {
@@ -253,7 +196,7 @@ const TemplateFill: React.FC = () => {
           </p>
         </div>
         {step !== 'upload' && (
-          <Button variant="outline" className="rounded-xl gap-2" onClick={resetFlow}>
+          <Button variant="outline" className="rounded-xl gap-2" onClick={reset}>
             <RefreshCcw size={18} />
             <span>重新开始</span>
           </Button>
@@ -451,7 +394,7 @@ const TemplateFill: React.FC = () => {
 
               {/* Action Buttons */}
               <div className="flex justify-center gap-4 mt-6">
-                <Button variant="outline" className="rounded-xl gap-2" onClick={resetFlow}>
+                <Button variant="outline" className="rounded-xl gap-2" onClick={reset}>
                   <RefreshCcw size={18} />
                   <span>继续填表</span>
                 </Button>

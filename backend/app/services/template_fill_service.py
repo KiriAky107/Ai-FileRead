@@ -597,16 +597,47 @@ class TemplateFillService:
 
         try:
             if file_type in ["xlsx", "xls"]:
-                fields = await self._get_template_fields_from_excel(file_path)
+                fields = await self._get_template_fields_from_excel(file_type, file_path)
             elif file_type == "docx":
                 fields = await self._get_template_fields_from_docx(file_path)
+
+            # 检查是否需要 AI 生成表头
+            # 条件：没有字段 OR 所有字段都是自动命名的（如"字段1"、"列1"、"Unnamed"开头）
+            needs_ai_generation = (
+                len(fields) == 0 or
+                all(self._is_auto_generated_field(f.name) for f in fields)
+            )
+
+            if needs_ai_generation:
+                logger.info(f"模板表头为空或自动生成，尝试 AI 生成表头... (fields={len(fields)})")
+                ai_fields = await self._generate_fields_with_ai(file_path, file_type)
+                if ai_fields:
+                    fields = ai_fields
+                    logger.info(f"AI 生成表头成功: {len(fields)} 个字段")
 
         except Exception as e:
             logger.error(f"提取模板字段失败: {str(e)}")
 
         return fields
 
-    async def _get_template_fields_from_excel(self, file_path: str) -> List[TemplateField]:
+    def _is_auto_generated_field(self, name: str) -> bool:
+        """检查字段名是否是自动生成的（无效表头）"""
+        import re
+        if not name:
+            return True
+        name_str = str(name).strip()
+        # 匹配 "字段1", "列1", "Field1", "Column1" 等自动生成的名字
+        # 或 "Unnamed: 0" 等 Excel 默认名字
+        if name_str.startswith('Unnamed'):
+            return True
+        if re.match(r'^[列字段ColumnField]+\d+$', name_str, re.IGNORECASE):
+            return True
+        if name_str in ['0', '1', '2'] or name_str.startswith('0.') or name_str.startswith('1.'):
+            # 纯数字或类似 "0.1" 的列名
+            return True
+        return False
+
+    async def _get_template_fields_from_excel(self, file_type: str, file_path: str) -> List[TemplateField]:
         """从 Excel 模板提取字段"""
         fields = []
 
@@ -1406,6 +1437,126 @@ class TemplateFillService:
             except Exception as e:
                 logger.warning(f"AI 分析文档 {doc.filename} 失败: {str(e)}")
                 continue
+
+        return None
+
+    async def _generate_fields_with_ai(
+        self,
+        file_path: str,
+        file_type: str
+    ) -> Optional[List[TemplateField]]:
+        """
+        使用 AI 为空表生成表头字段
+
+        当模板文件为空或没有表头时，调用 AI 分析并生成合适的字段名
+
+        Args:
+            file_path: 模板文件路径
+            file_type: 文件类型
+
+        Returns:
+            生成的字段列表，如果失败返回 None
+        """
+        try:
+            import pandas as pd
+
+            # 读取 Excel 内容检查是否为空
+            if file_type in ["xlsx", "xls"]:
+                df = pd.read_excel(file_path, header=None)
+                if df.shape[0] == 0 or df.shape[1] == 0:
+                    logger.info("Excel 表格为空")
+                    # 生成默认字段
+                    return [TemplateField(
+                        cell=self._column_to_cell(i),
+                        name=f"字段{i+1}",
+                        field_type="text",
+                        required=False,
+                        hint="请填写此字段"
+                    ) for i in range(5)]
+
+                # 表格有数据但没有表头
+                if df.shape[1] > 0:
+                    # 读取第一行作为参考，看是否为空
+                    first_row = df.iloc[0].tolist() if len(df) > 0 else []
+                    if not any(pd.notna(v) and str(v).strip() != '' for v in first_row):
+                        # 第一行为空，AI 生成表头
+                        content_sample = df.iloc[:10].to_string() if len(df) >= 10 else df.to_string()
+                    else:
+                        content_sample = df.to_string()
+                else:
+                    content_sample = ""
+
+            # 调用 AI 生成表头
+            prompt = f"""你是一个专业的表格设计助手。请为以下空白表格生成合适的表头字段。
+
+表格内容预览：
+{content_sample[:2000] if content_sample else "空白表格"}
+
+请生成5-10个简洁的表头字段名，这些字段应该：
+1. 简洁明了，易于理解
+2. 适合作为表格列标题
+3. 之间有明显的区分度
+
+请严格按照以下 JSON 格式输出（只需输出 JSON，不要其他内容）：
+{{
+    "fields": [
+        {{"name": "字段名1", "hint": "字段说明提示1"}},
+        {{"name": "字段名2", "hint": "字段说明提示2"}}
+    ]
+}}
+"""
+            messages = [
+                {"role": "system", "content": "你是一个专业的表格设计助手。请严格按JSON格式输出。"},
+                {"role": "user", "content": prompt}
+            ]
+
+            response = await self.llm.chat(
+                messages=messages,
+                temperature=0.3,
+                max_tokens=2000
+            )
+
+            content = self.llm.extract_message_content(response)
+            logger.info(f"AI 生成表头返回: {content[:500]}")
+
+            # 解析 JSON
+            import json
+            import re
+
+            # 清理 markdown 格式
+            cleaned = content.strip()
+            cleaned = re.sub(r'^```json\s*', '', cleaned, flags=re.MULTILINE)
+            cleaned = re.sub(r'^```\s*', '', cleaned, flags=re.MULTILINE)
+            cleaned = cleaned.strip()
+
+            # 查找 JSON
+            json_start = -1
+            for i, c in enumerate(cleaned):
+                if c == '{':
+                    json_start = i
+                    break
+
+            if json_start == -1:
+                logger.warning("无法找到 JSON 开始位置")
+                return None
+
+            json_text = cleaned[json_start:]
+            result = json.loads(json_text)
+
+            if result and "fields" in result:
+                fields = []
+                for idx, f in enumerate(result["fields"]):
+                    fields.append(TemplateField(
+                        cell=self._column_to_cell(idx),
+                        name=f.get("name", f"字段{idx+1}"),
+                        field_type="text",
+                        required=False,
+                        hint=f.get("hint", "")
+                    ))
+                return fields
+
+        except Exception as e:
+            logger.error(f"AI 生成表头失败: {str(e)}")
 
         return None
 
