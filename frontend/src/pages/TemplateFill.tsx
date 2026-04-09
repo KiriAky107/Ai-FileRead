@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { useDropzone } from 'react-dropzone';
 import {
   TableProperties,
@@ -14,7 +14,11 @@ import {
   RefreshCcw,
   ChevronDown,
   ChevronUp,
-  Loader2
+  Loader2,
+  Files,
+  Trash2,
+  Eye,
+  File
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
@@ -26,6 +30,13 @@ import { format } from 'date-fns';
 import { toast } from 'sonner';
 import { cn } from '@/lib/utils';
 import { Skeleton } from '@/components/ui/skeleton';
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { ScrollArea } from '@/components/ui/scroll-area';
 
 type DocumentItem = {
   doc_id: string;
@@ -41,6 +52,11 @@ type DocumentItem = {
   };
 };
 
+type SourceFile = {
+  file: File;
+  preview?: string;
+};
+
 type TemplateField = {
   cell: string;
   name: string;
@@ -50,64 +66,25 @@ type TemplateField = {
 };
 
 const TemplateFill: React.FC = () => {
-  const [step, setStep] = useState<'upload-template' | 'select-source' | 'preview' | 'filling'>('upload-template');
+  const [step, setStep] = useState<'upload' | 'filling' | 'preview'>('upload');
   const [templateFile, setTemplateFile] = useState<File | null>(null);
   const [templateFields, setTemplateFields] = useState<TemplateField[]>([]);
-  const [sourceDocs, setSourceDocs] = useState<DocumentItem[]>([]);
-  const [selectedDocs, setSelectedDocs] = useState<string[]>([]);
+  const [sourceFiles, setSourceFiles] = useState<SourceFile[]>([]);
+  const [sourceFilePaths, setSourceFilePaths] = useState<string[]>([]);
+  const [templateId, setTemplateId] = useState<string>('');
   const [loading, setLoading] = useState(false);
   const [filling, setFilling] = useState(false);
   const [filledResult, setFilledResult] = useState<any>(null);
+  const [previewDoc, setPreviewDoc] = useState<{ name: string; content: string } | null>(null);
+  const [previewOpen, setPreviewOpen] = useState(false);
 
-  // Load available source documents
-  useEffect(() => {
-    loadSourceDocuments();
-  }, []);
-
-  const loadSourceDocuments = async () => {
-    setLoading(true);
-    try {
-      const result = await backendApi.getDocuments(undefined, 100);
-      if (result.success) {
-        // Filter to only non-Excel documents that can be used as data sources
-        const docs = (result.documents || []).filter((d: DocumentItem) =>
-          ['docx', 'md', 'txt', 'xlsx'].includes(d.doc_type)
-        );
-        setSourceDocs(docs);
-      }
-    } catch (err: any) {
-      toast.error('加载数据源失败');
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const onTemplateDrop = async (acceptedFiles: File[]) => {
+  // 模板拖拽
+  const onTemplateDrop = useCallback((acceptedFiles: File[]) => {
     const file = acceptedFiles[0];
-    if (!file) return;
-
-    const ext = file.name.split('.').pop()?.toLowerCase();
-    if (!['xlsx', 'xls', 'docx'].includes(ext || '')) {
-      toast.error('仅支持 xlsx/xls/docx 格式的模板文件');
-      return;
+    if (file) {
+      setTemplateFile(file);
     }
-
-    setTemplateFile(file);
-    setLoading(true);
-
-    try {
-      const result = await backendApi.uploadTemplate(file);
-      if (result.success) {
-        setTemplateFields(result.fields || []);
-        setStep('select-source');
-        toast.success('模板上传成功');
-      }
-    } catch (err: any) {
-      toast.error('模板上传失败: ' + (err.message || '未知错误'));
-    } finally {
-      setLoading(false);
-    }
-  };
+  }, []);
 
   const { getRootProps: getTemplateProps, getInputProps: getTemplateInputProps, isDragActive: isTemplateDragActive } = useDropzone({
     onDrop: onTemplateDrop,
@@ -116,33 +93,108 @@ const TemplateFill: React.FC = () => {
       'application/vnd.ms-excel': ['.xls'],
       'application/vnd.openxmlformats-officedocument.wordprocessingml.document': ['.docx']
     },
-    maxFiles: 1
+    maxFiles: 1,
+    multiple: false
   });
 
-  const handleFillTemplate = async () => {
-    if (!templateFile || selectedDocs.length === 0) {
+  // 源文档拖拽
+  const onSourceDrop = useCallback((acceptedFiles: File[]) => {
+    const newFiles = acceptedFiles.map(f => ({
+      file: f,
+      preview: f.type.startsWith('text/') || f.name.endsWith('.md') ? undefined : undefined
+    }));
+    setSourceFiles(prev => [...prev, ...newFiles]);
+  }, []);
+
+  const { getRootProps: getSourceProps, getInputProps: getSourceInputProps, isDragActive: isSourceDragActive } = useDropzone({
+    onDrop: onSourceDrop,
+    accept: {
+      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': ['.xlsx'],
+      'application/vnd.ms-excel': ['.xls'],
+      'application/vnd.openxmlformats-officedocument.wordprocessingml.document': ['.docx'],
+      'text/plain': ['.txt'],
+      'text/markdown': ['.md']
+    },
+    multiple: true
+  });
+
+  const removeSourceFile = (index: number) => {
+    setSourceFiles(prev => prev.filter((_, i) => i !== index));
+  };
+
+  const handleJointUploadAndFill = async () => {
+    if (!templateFile) {
+      toast.error('请先上传模板文件');
+      return;
+    }
+
+    setLoading(true);
+
+    try {
+      // 使用联合上传API
+      const result = await backendApi.uploadTemplateAndSources(
+        templateFile,
+        sourceFiles.map(sf => sf.file)
+      );
+
+      if (result.success) {
+        setTemplateFields(result.fields || []);
+        setTemplateId(result.template_id);
+        setSourceFilePaths(result.source_file_paths || []);
+        toast.success('文档上传成功，开始智能填表');
+        setStep('filling');
+
+        // 自动开始填表
+        const fillResult = await backendApi.fillTemplate(
+          result.template_id,
+          result.fields || [],
+          [],  // 使用 source_file_paths 而非 source_doc_ids
+          result.source_file_paths || [],
+          '请从以下文档中提取相关信息填写表格'
+        );
+
+        setFilledResult(fillResult);
+        setStep('preview');
+        toast.success('表格填写完成');
+      }
+    } catch (err: any) {
+      toast.error('处理失败: ' + (err.message || '未知错误'));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // 传统方式：先上传源文档再填表（兼容已有文档库的场景）
+  const handleFillWithExistingDocs = async (selectedDocIds: string[]) => {
+    if (!templateFile || selectedDocIds.length === 0) {
       toast.error('请选择数据源文档');
       return;
     }
 
-    setFilling(true);
+    setLoading(true);
     setStep('filling');
 
     try {
-      // 调用后端填表接口，传递选中的文档ID
-      const result = await backendApi.fillTemplate(
-        'temp-template-id',
-        templateFields,
-        selectedDocs  // 传递源文档ID列表
+      // 先上传模板获取template_id
+      const uploadResult = await backendApi.uploadTemplate(templateFile);
+
+      const fillResult = await backendApi.fillTemplate(
+        uploadResult.template_id,
+        uploadResult.fields || [],
+        selectedDocIds,
+        [],
+        '请从以下文档中提取相关信息填写表格'
       );
-      setFilledResult(result);
+
+      setTemplateFields(uploadResult.fields || []);
+      setTemplateId(uploadResult.template_id);
+      setFilledResult(fillResult);
       setStep('preview');
       toast.success('表格填写完成');
     } catch (err: any) {
       toast.error('填表失败: ' + (err.message || '未知错误'));
-      setStep('select-source');
     } finally {
-      setFilling(false);
+      setLoading(false);
     }
   };
 
@@ -150,7 +202,11 @@ const TemplateFill: React.FC = () => {
     if (!templateFile || !filledResult) return;
 
     try {
-      const blob = await backendApi.exportFilledTemplate('temp', filledResult.filled_data || {}, 'xlsx');
+      const blob = await backendApi.exportFilledTemplate(
+        templateId || 'temp',
+        filledResult.filled_data || {},
+        'xlsx'
+      );
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
@@ -164,11 +220,27 @@ const TemplateFill: React.FC = () => {
   };
 
   const resetFlow = () => {
-    setStep('upload-template');
+    setStep('upload');
     setTemplateFile(null);
     setTemplateFields([]);
-    setSelectedDocs([]);
+    setSourceFiles([]);
+    setSourceFilePaths([]);
+    setTemplateId('');
     setFilledResult(null);
+  };
+
+  const getFileIcon = (filename: string) => {
+    const ext = filename.split('.').pop()?.toLowerCase();
+    if (['xlsx', 'xls'].includes(ext || '')) {
+      return <FileSpreadsheet size={20} className="text-emerald-500" />;
+    }
+    if (ext === 'docx') {
+      return <FileText size={20} className="text-blue-500" />;
+    }
+    if (['md', 'txt'].includes(ext || '')) {
+      return <FileText size={20} className="text-orange-500" />;
+    }
+    return <File size={20} className="text-gray-500" />;
   };
 
   return (
@@ -180,7 +252,7 @@ const TemplateFill: React.FC = () => {
             根据您的表格模板，自动聚合多源文档信息进行精准填充
           </p>
         </div>
-        {step !== 'upload-template' && (
+        {step !== 'upload' && (
           <Button variant="outline" className="rounded-xl gap-2" onClick={resetFlow}>
             <RefreshCcw size={18} />
             <span>重新开始</span>
@@ -188,200 +260,129 @@ const TemplateFill: React.FC = () => {
         )}
       </section>
 
-      {/* Progress Steps */}
-      <div className="flex items-center justify-center gap-4">
-        {['上传模板', '选择数据源', '填写预览'].map((label, idx) => {
-          const stepIndex = ['upload-template', 'select-source', 'preview'].indexOf(step);
-          const isActive = idx <= stepIndex;
-          const isCurrent = idx === stepIndex;
-
-          return (
-            <React.Fragment key={idx}>
-              <div className={cn(
-                "flex items-center gap-2 px-4 py-2 rounded-full transition-all",
-                isActive ? "bg-primary text-primary-foreground" : "bg-muted text-muted-foreground"
-              )}>
-                <div className={cn(
-                  "w-6 h-6 rounded-full flex items-center justify-center text-xs font-bold",
-                  isCurrent ? "bg-white/20" : ""
-                )}>
-                  {idx + 1}
-                </div>
-                <span className="text-sm font-medium">{label}</span>
-              </div>
-              {idx < 2 && (
-                <div className={cn(
-                  "w-12 h-0.5",
-                  idx < stepIndex ? "bg-primary" : "bg-muted"
-                )} />
-              )}
-            </React.Fragment>
-          );
-        })}
-      </div>
-
-      {/* Step 1: Upload Template */}
-      {step === 'upload-template' && (
-        <div
-          {...getTemplateProps()}
-          className={cn(
-            "border-2 border-dashed rounded-3xl p-16 transition-all duration-300 flex flex-col items-center justify-center text-center cursor-pointer group",
-            isTemplateDragActive ? "border-primary bg-primary/5" : "border-muted-foreground/20 hover:border-primary/50 hover:bg-primary/5"
-          )}
-        >
-          <input {...getTemplateInputProps()} />
-          <div className="w-20 h-20 rounded-2xl bg-primary/10 text-primary flex items-center justify-center mb-6 group-hover:scale-110 transition-transform">
-            {loading ? <Loader2 className="animate-spin" size={40} /> : <Upload size={40} />}
-          </div>
-          <div className="space-y-2 max-w-md">
-            <p className="text-xl font-bold tracking-tight">
-              {isTemplateDragActive ? '释放以开始上传' : '点击或拖拽上传表格模板'}
-            </p>
-            <p className="text-sm text-muted-foreground">
-              支持 Excel (.xlsx, .xls) 或 Word (.docx) 格式的表格模板
-            </p>
-          </div>
-          <div className="mt-6 flex gap-3">
-            <Badge variant="outline" className="bg-emerald-500/10 text-emerald-600 border-emerald-200">
-              <FileSpreadsheet size={14} className="mr-1" /> Excel 模板
-            </Badge>
-            <Badge variant="outline" className="bg-blue-500/10 text-blue-600 border-blue-200">
-              <FileText size={14} className="mr-1" /> Word 模板
-            </Badge>
-          </div>
-        </div>
-      )}
-
-      {/* Step 2: Select Source Documents */}
-      {step === 'select-source' && (
-        <div className="space-y-6">
-          {/* Template Info */}
+      {/* Step 1: Upload - Joint Upload of Template + Source Docs */}
+      {step === 'upload' && (
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+          {/* Template Upload */}
           <Card className="border-none shadow-md">
             <CardHeader className="pb-4">
               <CardTitle className="text-lg flex items-center gap-2">
                 <FileSpreadsheet className="text-primary" size={20} />
-                已上传模板
-              </CardTitle>
-            </CardHeader>
-            <CardContent>
-              <div className="flex items-center gap-4">
-                <div className="w-12 h-12 rounded-xl bg-emerald-500/10 text-emerald-500 flex items-center justify-center">
-                  <FileSpreadsheet size={24} />
-                </div>
-                <div className="flex-1">
-                  <p className="font-bold">{templateFile?.name}</p>
-                  <p className="text-sm text-muted-foreground">
-                    {templateFields.length} 个字段待填写
-                  </p>
-                </div>
-                <Button variant="ghost" size="sm" onClick={() => setStep('upload-template')}>
-                  重新选择
-                </Button>
-              </div>
-
-              {/* Template Fields Preview */}
-              <div className="mt-4 p-4 bg-muted/30 rounded-xl">
-                <p className="text-xs font-bold uppercase tracking-widest text-muted-foreground mb-3">待填写字段</p>
-                <div className="flex flex-wrap gap-2">
-                  {templateFields.map((field, idx) => (
-                    <Badge key={idx} variant="outline" className="bg-background">
-                      {field.name}
-                    </Badge>
-                  ))}
-                </div>
-              </div>
-            </CardContent>
-          </Card>
-
-          {/* Source Documents Selection */}
-          <Card className="border-none shadow-md">
-            <CardHeader className="pb-4">
-              <CardTitle className="text-lg flex items-center gap-2">
-                <FileText className="text-primary" size={20} />
-                选择数据源文档
+                表格模板
               </CardTitle>
               <CardDescription>
-                从已上传的文档中选择作为填表的数据来源，支持 Excel 和非结构化文档
+                上传需要填写的 Excel/Word 模板文件
               </CardDescription>
             </CardHeader>
             <CardContent>
-              {loading ? (
-                <div className="space-y-3">
-                  {[1, 2, 3].map(i => <Skeleton key={i} className="h-16 w-full rounded-xl" />)}
-                </div>
-              ) : sourceDocs.length > 0 ? (
-                <div className="space-y-3">
-                  {sourceDocs.map(doc => (
-                    <div
-                      key={doc.doc_id}
-                      className={cn(
-                        "flex items-center gap-4 p-4 rounded-xl border-2 transition-all cursor-pointer",
-                        selectedDocs.includes(doc.doc_id)
-                          ? "border-primary bg-primary/5"
-                          : "border-border hover:bg-muted/30"
-                      )}
-                      onClick={() => {
-                        setSelectedDocs(prev =>
-                          prev.includes(doc.doc_id)
-                            ? prev.filter(id => id !== doc.doc_id)
-                            : [...prev, doc.doc_id]
-                        );
-                      }}
-                    >
-                      <div className={cn(
-                        "w-6 h-6 rounded-md border-2 flex items-center justify-center transition-all",
-                        selectedDocs.includes(doc.doc_id)
-                          ? "border-primary bg-primary text-white"
-                          : "border-muted-foreground/30"
-                      )}>
-                        {selectedDocs.includes(doc.doc_id) && <CheckCircle2 size={14} />}
-                      </div>
-                      <div className={cn(
-                        "w-10 h-10 rounded-lg flex items-center justify-center",
-                        doc.doc_type === 'xlsx' ? "bg-emerald-500/10 text-emerald-500" : "bg-blue-500/10 text-blue-500"
-                      )}>
-                        {doc.doc_type === 'xlsx' ? <FileSpreadsheet size={20} /> : <FileText size={20} />}
-                      </div>
-                      <div className="flex-1 min-w-0">
-                        <p className="font-semibold truncate">{doc.original_filename}</p>
-                        <p className="text-xs text-muted-foreground">
-                          {doc.doc_type.toUpperCase()} • {format(new Date(doc.created_at), 'yyyy-MM-dd')}
-                        </p>
-                      </div>
-                      {doc.metadata?.columns && (
-                        <Badge variant="outline" className="text-xs">
-                          {doc.metadata.columns.length} 列
-                        </Badge>
-                      )}
-                    </div>
-                  ))}
+              {!templateFile ? (
+                <div
+                  {...getTemplateProps()}
+                  className={cn(
+                    "border-2 border-dashed rounded-2xl p-8 transition-all duration-300 flex flex-col items-center justify-center text-center cursor-pointer group min-h-[200px]",
+                    isTemplateDragActive ? "border-primary bg-primary/5" : "border-muted-foreground/20 hover:border-primary/50 hover:bg-primary/5"
+                  )}
+                >
+                  <input {...getTemplateInputProps()} />
+                  <div className="w-14 h-14 rounded-xl bg-primary/10 text-primary flex items-center justify-center mb-4 group-hover:scale-110 transition-transform">
+                    {loading ? <Loader2 className="animate-spin" size={28} /> : <Upload size={28} />}
+                  </div>
+                  <p className="font-medium">
+                    {isTemplateDragActive ? '释放以上传' : '点击或拖拽上传模板'}
+                  </p>
+                  <p className="text-xs text-muted-foreground mt-1">
+                    支持 .xlsx .xls .docx
+                  </p>
                 </div>
               ) : (
-                <div className="text-center py-12 text-muted-foreground">
-                  <FileText size={48} className="mx-auto mb-4 opacity-30" />
-                  <p>暂无数据源文档，请先上传文档</p>
+                <div className="flex items-center gap-3 p-4 bg-emerald-500/5 rounded-xl border border-emerald-200">
+                  <div className="w-10 h-10 rounded-lg bg-emerald-500/10 text-emerald-500 flex items-center justify-center">
+                    <FileSpreadsheet size={20} />
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <p className="font-medium truncate">{templateFile.name}</p>
+                    <p className="text-xs text-muted-foreground">
+                      {(templateFile.size / 1024).toFixed(1)} KB
+                    </p>
+                  </div>
+                  <Button variant="ghost" size="sm" onClick={() => setTemplateFile(null)}>
+                    <X size={16} />
+                  </Button>
+                </div>
+              )}
+            </CardContent>
+          </Card>
+
+          {/* Source Documents Upload */}
+          <Card className="border-none shadow-md">
+            <CardHeader className="pb-4">
+              <CardTitle className="text-lg flex items-center gap-2">
+                <Files className="text-primary" size={20} />
+                源文档
+              </CardTitle>
+              <CardDescription>
+                上传包含数据的源文档（支持多选），可同时上传多个文件
+              </CardDescription>
+            </CardHeader>
+            <CardContent>
+              <div
+                {...getSourceProps()}
+                className={cn(
+                  "border-2 border-dashed rounded-2xl p-8 transition-all duration-300 flex flex-col items-center justify-center text-center cursor-pointer group min-h-[200px]",
+                  isSourceDragActive ? "border-primary bg-primary/5" : "border-muted-foreground/20 hover:border-primary/50 hover:bg-primary/5"
+                )}
+              >
+                <input {...getSourceInputProps()} />
+                <div className="w-14 h-14 rounded-xl bg-blue-500/10 text-blue-500 flex items-center justify-center mb-4 group-hover:scale-110 transition-transform">
+                  {loading ? <Loader2 className="animate-spin" size={28} /> : <Upload size={28} />}
+                </div>
+                <p className="font-medium">
+                  {isSourceDragActive ? '释放以上传' : '点击或拖拽上传源文档'}
+                </p>
+                <p className="text-xs text-muted-foreground mt-1">
+                  支持 .xlsx .xls .docx .md .txt
+                </p>
+              </div>
+
+              {/* Selected Source Files */}
+              {sourceFiles.length > 0 && (
+                <div className="mt-4 space-y-2">
+                  {sourceFiles.map((sf, idx) => (
+                    <div key={idx} className="flex items-center gap-3 p-3 bg-muted/50 rounded-xl">
+                      {getFileIcon(sf.file.name)}
+                      <div className="flex-1 min-w-0">
+                        <p className="text-sm font-medium truncate">{sf.file.name}</p>
+                        <p className="text-xs text-muted-foreground">
+                          {(sf.file.size / 1024).toFixed(1)} KB
+                        </p>
+                      </div>
+                      <Button variant="ghost" size="sm" onClick={() => removeSourceFile(idx)}>
+                        <Trash2 size={14} className="text-red-500" />
+                      </Button>
+                    </div>
+                  ))}
                 </div>
               )}
             </CardContent>
           </Card>
 
           {/* Action Button */}
-          <div className="flex justify-center">
+          <div className="col-span-1 lg:col-span-2 flex justify-center">
             <Button
               size="lg"
-              className="rounded-xl px-8 shadow-lg shadow-primary/20 gap-2"
-              disabled={selectedDocs.length === 0 || filling}
-              onClick={handleFillTemplate}
+              className="rounded-xl px-12 shadow-lg shadow-primary/20 gap-2"
+              disabled={!templateFile || loading}
+              onClick={handleJointUploadAndFill}
             >
-              {filling ? (
+              {loading ? (
                 <>
                   <Loader2 className="animate-spin" size={20} />
-                  <span>AI 正在分析并填表...</span>
+                  <span>正在处理...</span>
                 </>
               ) : (
                 <>
                   <Sparkles size={20} />
-                  <span>开始智能填表</span>
+                  <span>上传并智能填表</span>
                 </>
               )}
             </Button>
@@ -389,49 +390,7 @@ const TemplateFill: React.FC = () => {
         </div>
       )}
 
-      {/* Step 3: Preview Results */}
-      {step === 'preview' && filledResult && (
-        <Card className="border-none shadow-md">
-          <CardHeader>
-            <CardTitle className="text-lg flex items-center gap-2">
-              <CheckCircle2 className="text-emerald-500" size={20} />
-              填表完成
-            </CardTitle>
-            <CardDescription>
-              系统已根据 {selectedDocs.length} 份文档自动完成表格填写
-            </CardDescription>
-          </CardHeader>
-          <CardContent className="space-y-6">
-            {/* Filled Data Preview */}
-            <div className="p-6 bg-muted/30 rounded-2xl">
-              <div className="space-y-4">
-                {templateFields.map((field, idx) => (
-                  <div key={idx} className="flex items-center gap-4">
-                    <div className="w-32 text-sm font-medium text-muted-foreground">{field.name}</div>
-                    <div className="flex-1 p-3 bg-background rounded-xl border">
-                      {(filledResult.filled_data || {})[field.name] || '-'}
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </div>
-
-            {/* Action Buttons */}
-            <div className="flex justify-center gap-4">
-              <Button variant="outline" className="rounded-xl gap-2" onClick={resetFlow}>
-                <RefreshCcw size={18} />
-                <span>继续填表</span>
-              </Button>
-              <Button className="rounded-xl gap-2 shadow-lg shadow-primary/20" onClick={handleExport}>
-                <Download size={18} />
-                <span>导出结果</span>
-              </Button>
-            </div>
-          </CardContent>
-        </Card>
-      )}
-
-      {/* Filling State */}
+      {/* Step 2: Filling State */}
       {step === 'filling' && (
         <Card className="border-none shadow-md">
           <CardContent className="py-16 flex flex-col items-center justify-center">
@@ -440,11 +399,107 @@ const TemplateFill: React.FC = () => {
             </div>
             <h3 className="text-xl font-bold mb-2">AI 正在智能分析并填表</h3>
             <p className="text-muted-foreground text-center max-w-md">
-              系统正在从 {selectedDocs.length} 份文档中检索相关信息，生成字段描述，并使用 RAG 增强填写准确性...
+              系统正在从 {sourceFiles.length || sourceFilePaths.length} 份文档中检索相关信息...
             </p>
           </CardContent>
         </Card>
       )}
+
+      {/* Step 3: Preview Results */}
+      {step === 'preview' && filledResult && (
+        <div className="space-y-6">
+          <Card className="border-none shadow-md">
+            <CardHeader>
+              <CardTitle className="text-lg flex items-center gap-2">
+                <CheckCircle2 className="text-emerald-500" size={20} />
+                填表完成
+              </CardTitle>
+              <CardDescription>
+                系统已根据 {sourceFiles.length || sourceFilePaths.length} 份文档自动完成表格填写
+              </CardDescription>
+            </CardHeader>
+            <CardContent>
+              {/* Filled Data Preview */}
+              <div className="p-6 bg-muted/30 rounded-2xl">
+                <div className="space-y-4">
+                  {templateFields.map((field, idx) => {
+                    const value = filledResult.filled_data?.[field.name];
+                    const displayValue = Array.isArray(value)
+                      ? value.filter(v => v && String(v).trim()).join(', ') || '-'
+                      : value || '-';
+                    return (
+                      <div key={idx} className="flex items-center gap-4">
+                        <div className="w-40 text-sm font-medium text-muted-foreground">{field.name}</div>
+                        <div className="flex-1 p-3 bg-background rounded-xl border">
+                          {displayValue}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {/* Source Files Info */}
+              <div className="mt-4 flex flex-wrap gap-2">
+                {sourceFiles.map((sf, idx) => (
+                  <Badge key={idx} variant="outline" className="bg-blue-500/5">
+                    {getFileIcon(sf.file.name)}
+                    <span className="ml-1">{sf.file.name}</span>
+                  </Badge>
+                ))}
+              </div>
+
+              {/* Action Buttons */}
+              <div className="flex justify-center gap-4 mt-6">
+                <Button variant="outline" className="rounded-xl gap-2" onClick={resetFlow}>
+                  <RefreshCcw size={18} />
+                  <span>继续填表</span>
+                </Button>
+                <Button className="rounded-xl gap-2 shadow-lg shadow-primary/20" onClick={handleExport}>
+                  <Download size={18} />
+                  <span>导出结果</span>
+                </Button>
+              </div>
+            </CardContent>
+          </Card>
+
+          {/* Fill Details */}
+          {filledResult.fill_details && filledResult.fill_details.length > 0 && (
+            <Card className="border-none shadow-md">
+              <CardHeader>
+                <CardTitle className="text-lg">填写详情</CardTitle>
+              </CardHeader>
+              <CardContent>
+                <div className="space-y-3">
+                  {filledResult.fill_details.map((detail: any, idx: number) => (
+                    <div key={idx} className="flex items-start gap-3 p-3 bg-muted/30 rounded-xl text-sm">
+                      <div className="w-1 h-1 rounded-full bg-primary mt-2" />
+                      <div className="flex-1">
+                        <div className="font-medium">{detail.field}</div>
+                        <div className="text-muted-foreground text-xs mt-1">
+                          来源: {detail.source} | 置信度: {detail.confidence ? (detail.confidence * 100).toFixed(0) + '%' : 'N/A'}
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </CardContent>
+            </Card>
+          )}
+        </div>
+      )}
+
+      {/* Preview Dialog */}
+      <Dialog open={previewOpen} onOpenChange={setPreviewOpen}>
+        <DialogContent className="max-w-2xl">
+          <DialogHeader>
+            <DialogTitle>{previewDoc?.name || '文档预览'}</DialogTitle>
+          </DialogHeader>
+          <ScrollArea className="max-h-[60vh]">
+            <pre className="text-sm whitespace-pre-wrap">{previewDoc?.content}</pre>
+          </ScrollArea>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 };

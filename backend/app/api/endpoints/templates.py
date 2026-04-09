@@ -5,15 +5,18 @@
 """
 import io
 import logging
+import uuid
 from typing import List, Optional
 
-from fastapi import APIRouter, File, HTTPException, Query, UploadFile
+from fastapi import APIRouter, File, HTTPException, Query, UploadFile, BackgroundTasks
 from fastapi.responses import StreamingResponse
 import pandas as pd
 from pydantic import BaseModel
 
 from app.services.template_fill_service import template_fill_service, TemplateField
 from app.services.file_service import file_service
+from app.core.database import mongodb
+from app.core.document_parser import ParserFactory
 
 logger = logging.getLogger(__name__)
 
@@ -107,6 +110,172 @@ async def upload_template(
     except Exception as e:
         logger.error(f"上传模板失败: {str(e)}")
         raise HTTPException(status_code=500, detail=f"上传失败: {str(e)}")
+
+
+@router.post("/upload-joint")
+async def upload_joint_template(
+    background_tasks: BackgroundTasks,
+    template_file: UploadFile = File(..., description="模板文件"),
+    source_files: List[UploadFile] = File(..., description="源文档文件列表"),
+):
+    """
+    联合上传模板和源文档，一键完成解析和存储
+
+    1. 保存模板文件并提取字段
+    2. 异步处理源文档（解析+存MongoDB）
+    3. 返回模板信息和源文档ID列表
+
+    Args:
+        template_file: 模板文件 (xlsx/xls/docx)
+        source_files: 源文档列表 (docx/xlsx/md/txt)
+
+    Returns:
+        模板ID、字段列表、源文档ID列表
+    """
+    if not template_file.filename:
+        raise HTTPException(status_code=400, detail="模板文件名为空")
+
+    # 验证模板格式
+    template_ext = template_file.filename.split('.')[-1].lower()
+    if template_ext not in ['xlsx', 'xls', 'docx']:
+        raise HTTPException(
+            status_code=400,
+            detail=f"不支持的模板格式: {template_ext}，仅支持 xlsx/xls/docx"
+        )
+
+    # 验证源文档格式
+    valid_exts = ['docx', 'xlsx', 'xls', 'md', 'txt']
+    for sf in source_files:
+        if sf.filename:
+            sf_ext = sf.filename.split('.')[-1].lower()
+            if sf_ext not in valid_exts:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"不支持的源文档格式: {sf_ext}，仅支持 docx/xlsx/xls/md/txt"
+                )
+
+    try:
+        # 1. 保存模板文件并提取字段
+        template_content = await template_file.read()
+        template_path = file_service.save_uploaded_file(
+            template_content,
+            template_file.filename,
+            subfolder="templates"
+        )
+        template_fields = await template_fill_service.get_template_fields_from_file(
+            template_path,
+            template_ext
+        )
+
+        # 2. 处理源文档 - 保存文件
+        source_file_info = []
+        for sf in source_files:
+            if sf.filename:
+                sf_content = await sf.read()
+                sf_ext = sf.filename.split('.')[-1].lower()
+                sf_path = file_service.save_uploaded_file(
+                    sf_content,
+                    sf.filename,
+                    subfolder=sf_ext
+                )
+                source_file_info.append({
+                    "path": sf_path,
+                    "filename": sf.filename,
+                    "ext": sf_ext
+                })
+
+        # 3. 异步处理源文档到MongoDB
+        task_id = str(uuid.uuid4())
+        if source_file_info:
+            background_tasks.add_task(
+                process_source_documents,
+                task_id=task_id,
+                files=source_file_info
+            )
+
+        logger.info(f"联合上传完成: 模板={template_file.filename}, 源文档={len(source_file_info)}个")
+
+        return {
+            "success": True,
+            "template_id": template_path,
+            "filename": template_file.filename,
+            "file_type": template_ext,
+            "fields": [
+                {
+                    "cell": f.cell,
+                    "name": f.name,
+                    "field_type": f.field_type,
+                    "required": f.required,
+                    "hint": f.hint
+                }
+                for f in template_fields
+            ],
+            "field_count": len(template_fields),
+            "source_file_paths": [f["path"] for f in source_file_info],
+            "source_filenames": [f["filename"] for f in source_file_info],
+            "task_id": task_id
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"联合上传失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"联合上传失败: {str(e)}")
+
+
+async def process_source_documents(task_id: str, files: List[dict]):
+    """异步处理源文档，存入MongoDB"""
+    from app.core.database import redis_db
+
+    try:
+        await redis_db.set_task_status(
+            task_id, status="processing",
+            meta={"progress": 0, "message": "开始处理源文档"}
+        )
+
+        doc_ids = []
+        for i, file_info in enumerate(files):
+            try:
+                parser = ParserFactory.get_parser(file_info["path"])
+                result = parser.parse(file_info["path"])
+
+                if result.success:
+                    doc_id = await mongodb.insert_document(
+                        doc_type=file_info["ext"],
+                        content=result.data.get("content", ""),
+                        metadata={
+                            **result.metadata,
+                            "original_filename": file_info["filename"],
+                            "file_path": file_info["path"]
+                        },
+                        structured_data=result.data.get("structured_data")
+                    )
+                    doc_ids.append(doc_id)
+                    logger.info(f"源文档处理成功: {file_info['filename']}, doc_id: {doc_id}")
+                else:
+                    logger.error(f"源文档解析失败: {file_info['filename']}, error: {result.error}")
+
+            except Exception as e:
+                logger.error(f"源文档处理异常: {file_info['filename']}, error: {str(e)}")
+
+            progress = int((i + 1) / len(files) * 100)
+            await redis_db.set_task_status(
+                task_id, status="processing",
+                meta={"progress": progress, "message": f"已处理 {i+1}/{len(files)}"}
+            )
+
+        await redis_db.set_task_status(
+            task_id, status="success",
+            meta={"progress": 100, "message": "源文档处理完成", "doc_ids": doc_ids}
+        )
+        logger.info(f"所有源文档处理完成: {len(doc_ids)}个")
+
+    except Exception as e:
+        logger.error(f"源文档批量处理失败: {str(e)}")
+        await redis_db.set_task_status(
+            task_id, status="failure",
+            meta={"error": str(e)}
+        )
 
 
 @router.post("/fields")
