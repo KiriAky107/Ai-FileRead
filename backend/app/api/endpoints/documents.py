@@ -23,6 +23,52 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/upload", tags=["文档上传"])
 
 
+# ==================== 辅助函数 ====================
+
+async def update_task_status(
+    task_id: str,
+    status: str,
+    progress: int = 0,
+    message: str = "",
+    result: dict = None,
+    error: str = None
+):
+    """
+    更新任务状态，同时写入 Redis 和 MongoDB
+
+    Args:
+        task_id: 任务ID
+        status: 状态
+        progress: 进度
+        message: 消息
+        result: 结果
+        error: 错误信息
+    """
+    meta = {"progress": progress, "message": message}
+    if result:
+        meta["result"] = result
+    if error:
+        meta["error"] = error
+
+    # 尝试写入 Redis
+    try:
+        await redis_db.set_task_status(task_id, status, meta)
+    except Exception as e:
+        logger.warning(f"Redis 任务状态更新失败: {e}")
+
+    # 尝试写入 MongoDB（作为备用）
+    try:
+        await mongodb.update_task(
+            task_id=task_id,
+            status=status,
+            message=message,
+            result=result,
+            error=error
+        )
+    except Exception as e:
+        logger.warning(f"MongoDB 任务状态更新失败: {e}")
+
+
 # ==================== 请求/响应模型 ====================
 
 class UploadResponse(BaseModel):
@@ -77,6 +123,17 @@ async def upload_document(
     task_id = str(uuid.uuid4())
 
     try:
+        # 保存任务记录到 MongoDB（如果 Redis 不可用时仍能查询）
+        try:
+            await mongodb.insert_task(
+                task_id=task_id,
+                task_type="document_parse",
+                status="pending",
+                message=f"文档 {file.filename} 已提交处理"
+            )
+        except Exception as mongo_err:
+            logger.warning(f"MongoDB 保存任务记录失败: {mongo_err}")
+
         content = await file.read()
         saved_path = file_service.save_uploaded_file(
             content,
@@ -122,6 +179,17 @@ async def upload_documents(
     saved_paths = []
 
     try:
+        # 保存任务记录到 MongoDB
+        try:
+            await mongodb.insert_task(
+                task_id=task_id,
+                task_type="batch_parse",
+                status="pending",
+                message=f"已提交 {len(files)} 个文档处理"
+            )
+        except Exception as mongo_err:
+            logger.warning(f"MongoDB 保存批量任务记录失败: {mongo_err}")
+
         for file in files:
             if not file.filename:
                 continue
@@ -159,9 +227,9 @@ async def process_document(
     """处理单个文档"""
     try:
         # 状态: 解析中
-        await redis_db.set_task_status(
+        await update_task_status(
             task_id, status="processing",
-            meta={"progress": 10, "message": "正在解析文档"}
+            progress=10, message="正在解析文档"
         )
 
         # 解析文档
@@ -172,9 +240,9 @@ async def process_document(
             raise Exception(result.error or "解析失败")
 
         # 状态: 存储中
-        await redis_db.set_task_status(
+        await update_task_status(
             task_id, status="processing",
-            meta={"progress": 30, "message": "正在存储数据"}
+            progress=30, message="正在存储数据"
         )
 
         # 存储到 MongoDB
@@ -191,9 +259,9 @@ async def process_document(
 
         # 如果是 Excel，存储到 MySQL + AI生成描述 + RAG索引
         if doc_type in ["xlsx", "xls"]:
-            await redis_db.set_task_status(
+            await update_task_status(
                 task_id, status="processing",
-                meta={"progress": 50, "message": "正在存储到MySQL并生成字段描述"}
+                progress=50, message="正在存储到MySQL并生成字段描述"
             )
 
             try:
@@ -215,9 +283,9 @@ async def process_document(
 
         else:
             # 非结构化文档
-            await redis_db.set_task_status(
+            await update_task_status(
                 task_id, status="processing",
-                meta={"progress": 60, "message": "正在建立索引"}
+                progress=60, message="正在建立索引"
             )
 
             # 如果文档中有表格数据，提取并存储到 MySQL + RAG
@@ -238,17 +306,13 @@ async def process_document(
             await index_document_to_rag(doc_id, original_filename, result, doc_type)
 
         # 完成
-        await redis_db.set_task_status(
+        await update_task_status(
             task_id, status="success",
-            meta={
-                "progress": 100,
-                "message": "处理完成",
+            progress=100, message="处理完成",
+            result={
                 "doc_id": doc_id,
-                "result": {
-                    "doc_id": doc_id,
-                    "doc_type": doc_type,
-                    "filename": original_filename
-                }
+                "doc_type": doc_type,
+                "filename": original_filename
             }
         )
 
@@ -256,18 +320,19 @@ async def process_document(
 
     except Exception as e:
         logger.error(f"文档处理失败: {str(e)}")
-        await redis_db.set_task_status(
+        await update_task_status(
             task_id, status="failure",
-            meta={"error": str(e)}
+            progress=0, message="处理失败",
+            error=str(e)
         )
 
 
 async def process_documents_batch(task_id: str, files: List[dict]):
     """批量处理文档"""
     try:
-        await redis_db.set_task_status(
+        await update_task_status(
             task_id, status="processing",
-            meta={"progress": 0, "message": "开始批量处理"}
+            progress=0, message="开始批量处理"
         )
 
         results = []
@@ -318,21 +383,23 @@ async def process_documents_batch(task_id: str, files: List[dict]):
                 results.append({"filename": file_info["filename"], "success": False, "error": str(e)})
 
             progress = int((i + 1) / len(files) * 100)
-            await redis_db.set_task_status(
+            await update_task_status(
                 task_id, status="processing",
-                meta={"progress": progress, "message": f"已处理 {i+1}/{len(files)}"}
+                progress=progress, message=f"已处理 {i+1}/{len(files)}"
             )
 
-        await redis_db.set_task_status(
+        await update_task_status(
             task_id, status="success",
-            meta={"progress": 100, "message": "批量处理完成", "results": results}
+            progress=100, message="批量处理完成",
+            result={"results": results}
         )
 
     except Exception as e:
         logger.error(f"批量处理失败: {str(e)}")
-        await redis_db.set_task_status(
+        await update_task_status(
             task_id, status="failure",
-            meta={"error": str(e)}
+            progress=0, message="批量处理失败",
+            error=str(e)
         )
 
 

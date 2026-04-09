@@ -11,7 +11,8 @@ import {
   ChevronDown,
   ChevronUp,
   Trash2,
-  AlertCircle
+  AlertCircle,
+  HelpCircle
 } from 'lucide-react';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -24,9 +25,9 @@ import { Skeleton } from '@/components/ui/skeleton';
 
 type Task = {
   task_id: string;
-  status: 'pending' | 'processing' | 'success' | 'failure';
+  status: 'pending' | 'processing' | 'success' | 'failure' | 'unknown';
   created_at: string;
-  completed_at?: string;
+  updated_at?: string;
   message?: string;
   result?: any;
   error?: string;
@@ -38,54 +39,38 @@ const TaskHistory: React.FC = () => {
   const [loading, setLoading] = useState(true);
   const [expandedTask, setExpandedTask] = useState<string | null>(null);
 
-  // Mock data for demonstration
-  useEffect(() => {
-    // 模拟任务数据，实际应该从后端获取
-    setTasks([
-      {
-        task_id: 'task-001',
-        status: 'success',
-        created_at: new Date(Date.now() - 3600000).toISOString(),
-        completed_at: new Date(Date.now() - 3500000).toISOString(),
-        task_type: 'document_parse',
-        message: '文档解析完成',
-        result: {
-          doc_id: 'doc-001',
-          filename: 'report_q1_2026.docx',
-          extracted_fields: ['标题', '作者', '日期', '金额']
-        }
-      },
-      {
-        task_id: 'task-002',
-        status: 'success',
-        created_at: new Date(Date.now() - 7200000).toISOString(),
-        completed_at: new Date(Date.now() - 7100000).toISOString(),
-        task_type: 'excel_analysis',
-        message: 'Excel 分析完成',
-        result: {
-          filename: 'sales_data.xlsx',
-          row_count: 1250,
-          charts_generated: 3
-        }
-      },
-      {
-        task_id: 'task-003',
-        status: 'processing',
-        created_at: new Date(Date.now() - 600000).toISOString(),
-        task_type: 'template_fill',
-        message: '正在填充表格...'
-      },
-      {
-        task_id: 'task-004',
-        status: 'failure',
-        created_at: new Date(Date.now() - 86400000).toISOString(),
-        completed_at: new Date(Date.now() - 86390000).toISOString(),
-        task_type: 'document_parse',
-        message: '解析失败',
-        error: '文件格式不支持或文件已损坏'
+  // 获取任务历史数据
+  const fetchTasks = async () => {
+    try {
+      setLoading(true);
+      const response = await backendApi.getTasks(50, 0);
+      if (response.success && response.tasks) {
+        // 转换后端数据格式为前端格式
+        const convertedTasks: Task[] = response.tasks.map((t: any) => ({
+          task_id: t.task_id,
+          status: t.status || 'unknown',
+          created_at: t.created_at || new Date().toISOString(),
+          updated_at: t.updated_at,
+          message: t.message || '',
+          result: t.result,
+          error: t.error,
+          task_type: t.task_type || 'document_parse'
+        }));
+        setTasks(convertedTasks);
+      } else {
+        setTasks([]);
       }
-    ]);
-    setLoading(false);
+    } catch (error) {
+      console.error('获取任务列表失败:', error);
+      toast.error('获取任务列表失败');
+      setTasks([]);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    fetchTasks();
   }, []);
 
   const getStatusBadge = (status: string) => {
@@ -96,6 +81,8 @@ const TaskHistory: React.FC = () => {
         return <Badge className="bg-destructive text-white text-[10px]"><XCircle size={12} className="mr-1" />失败</Badge>;
       case 'processing':
         return <Badge className="bg-amber-500 text-white text-[10px]"><Loader2 size={12} className="mr-1 animate-spin" />处理中</Badge>;
+      case 'unknown':
+        return <Badge className="bg-gray-500 text-white text-[10px]"><HelpCircle size={12} className="mr-1" />未知</Badge>;
       default:
         return <Badge className="bg-gray-500 text-white text-[10px]"><Clock size={12} className="mr-1" />等待</Badge>;
     }
@@ -133,15 +120,22 @@ const TaskHistory: React.FC = () => {
   };
 
   const handleDelete = async (taskId: string) => {
-    setTasks(prev => prev.filter(t => t.task_id !== taskId));
-    toast.success('任务已删除');
+    try {
+      await backendApi.deleteTask(taskId);
+      setTasks(prev => prev.filter(t => t.task_id !== taskId));
+      toast.success('任务已删除');
+    } catch (error) {
+      console.error('删除任务失败:', error);
+      toast.error('删除任务失败');
+    }
   };
 
   const stats = {
     total: tasks.length,
     success: tasks.filter(t => t.status === 'success').length,
     processing: tasks.filter(t => t.status === 'processing').length,
-    failure: tasks.filter(t => t.status === 'failure').length
+    failure: tasks.filter(t => t.status === 'failure').length,
+    unknown: tasks.filter(t => t.status === 'unknown').length
   };
 
   return (
@@ -151,7 +145,7 @@ const TaskHistory: React.FC = () => {
           <h1 className="text-3xl font-extrabold tracking-tight">任务历史</h1>
           <p className="text-muted-foreground">查看和管理您所有的文档处理任务记录</p>
         </div>
-        <Button variant="outline" className="rounded-xl gap-2" onClick={() => window.location.reload()}>
+        <Button variant="outline" className="rounded-xl gap-2" onClick={() => fetchTasks()}>
           <RefreshCcw size={18} />
           <span>刷新</span>
         </Button>
@@ -194,7 +188,8 @@ const TaskHistory: React.FC = () => {
                     "w-12 h-12 rounded-xl flex items-center justify-center shrink-0",
                     task.status === 'success' ? "bg-emerald-500/10 text-emerald-500" :
                     task.status === 'failure' ? "bg-destructive/10 text-destructive" :
-                    "bg-amber-500/10 text-amber-500"
+                    task.status === 'processing' ? "bg-amber-500/10 text-amber-500" :
+                    "bg-gray-500/10 text-gray-500"
                   )}>
                     {task.status === 'processing' ? (
                       <Loader2 size={24} className="animate-spin" />
@@ -212,16 +207,16 @@ const TaskHistory: React.FC = () => {
                       </Badge>
                     </div>
                     <p className="text-sm text-muted-foreground">
-                      {task.message || '任务执行中...'}
+                      {task.message || (task.status === 'unknown' ? '无法获取状态' : '任务执行中...')}
                     </p>
                     <div className="flex items-center gap-4 text-xs text-muted-foreground">
                       <span className="flex items-center gap-1">
                         <Clock size={12} />
-                        {format(new Date(task.created_at), 'yyyy-MM-dd HH:mm:ss')}
+                        {task.created_at ? format(new Date(task.created_at), 'yyyy-MM-dd HH:mm:ss') : '时间未知'}
                       </span>
-                      {task.completed_at && (
+                      {task.updated_at && task.status !== 'processing' && (
                         <span>
-                          耗时: {Math.round((new Date(task.completed_at).getTime() - new Date(task.created_at).getTime()) / 1000)} 秒
+                          更新: {format(new Date(task.updated_at), 'HH:mm:ss')}
                         </span>
                       )}
                     </div>

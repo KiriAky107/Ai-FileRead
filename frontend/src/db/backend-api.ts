@@ -401,6 +401,49 @@ export const backendApi = {
   },
 
   /**
+   * 获取任务历史列表
+   */
+  async getTasks(
+    limit: number = 50,
+    skip: number = 0
+  ): Promise<{ success: boolean; tasks: any[]; count: number }> {
+    const url = `${BACKEND_BASE_URL}/tasks?limit=${limit}&skip=${skip}`;
+
+    try {
+      const response = await fetch(url);
+      if (!response.ok) {
+        const error = await response.json();
+        throw new Error(error.detail || '获取任务列表失败');
+      }
+      return await response.json();
+    } catch (error) {
+      console.error('获取任务列表失败:', error);
+      throw error;
+    }
+  },
+
+  /**
+   * 删除任务
+   */
+  async deleteTask(taskId: string): Promise<{ success: boolean; deleted: boolean }> {
+    const url = `${BACKEND_BASE_URL}/tasks/${taskId}`;
+
+    try {
+      const response = await fetch(url, {
+        method: 'DELETE'
+      });
+      if (!response.ok) {
+        const error = await response.json();
+        throw new Error(error.detail || '删除任务失败');
+      }
+      return await response.json();
+    } catch (error) {
+      console.error('删除任务失败:', error);
+      throw error;
+    }
+  },
+
+  /**
    * 轮询任务状态直到完成
    */
   async pollTaskStatus(

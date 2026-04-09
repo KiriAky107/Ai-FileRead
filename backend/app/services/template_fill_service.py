@@ -181,6 +181,22 @@ class TemplateFillService:
                     user_hint=user_hint
                 )
 
+                # AI审核：验证提取的值是否合理
+                if result.values and result.values[0]:
+                    logger.info(f"字段 {field.name} 进入AI审核阶段...")
+                    verified_result = await self._verify_field_value(
+                        field=field,
+                        extracted_values=result.values,
+                        source_docs=source_docs,
+                        user_hint=user_hint
+                    )
+                    if verified_result:
+                        # 审核给出了修正结果
+                        result = verified_result
+                        logger.info(f"字段 {field.name} 审核后修正值: {result.values[:3]}")
+                    else:
+                        logger.info(f"字段 {field.name} 审核通过，使用原提取结果")
+
                 # 存储结果 - 使用 values 数组
                 filled_data[field.name] = result.values if result.values else [""]
                 fill_details.append({
@@ -532,6 +548,137 @@ class TemplateFillService:
                 source=f"提取失败: {str(e)}",
                 confidence=0.0
             )
+
+    async def _verify_field_value(
+        self,
+        field: TemplateField,
+        extracted_values: List[str],
+        source_docs: List[SourceDocument],
+        user_hint: Optional[str] = None
+    ) -> Optional[FillResult]:
+        """
+        验证并修正提取的字段值
+
+        Args:
+            field: 字段定义
+            extracted_values: 已提取的值
+            source_docs: 源文档列表
+            user_hint: 用户提示
+
+        Returns:
+            验证后的结果，如果验证通过返回None（使用原结果）
+        """
+        if not extracted_values or not extracted_values[0]:
+            return None
+
+        if not source_docs:
+            return None
+
+        try:
+            # 构建验证上下文
+            context_text = self._build_context_text(source_docs, field_name=field.name, max_length=15000)
+
+            hint_text = field.hint if field.hint else f"请理解{field.name}字段的含义"
+            if user_hint:
+                hint_text = f"{user_hint}。{hint_text}"
+
+            prompt = f"""你是一个数据质量审核专家。请审核以下提取的数据是否合理。
+
+【待审核字段】
+字段名：{field.name}
+字段说明：{hint_text}
+
+【已提取的值】
+{extracted_values[:10]}  # 最多审核前10个值
+
+【源文档上下文】
+{context_text[:8000]}
+
+【审核要求】
+1. 这些值是否符合字段的含义？
+2. 值在原文中的原始含义是什么？检查是否有误解或误提取
+3. 是否存在明显错误、空值或不合理的数据？
+4. 如果表格有多个列，请确认提取的是正确的列
+
+请严格按照以下 JSON 格式输出（只需输出 JSON，不要其他内容）：
+{{
+    "is_valid": true或false,
+    "corrected_values": ["修正后的值列表"] 或 null（如果无需修正）,
+    "reason": "审核说明，解释判断理由",
+    "original_meaning": "值在原文中的原始含义描述"
+}}
+"""
+
+            messages = [
+                {"role": "system", "content": "你是一个严格的数据质量审核专家。请仔细核对原文和提取的值是否匹配。"},
+                {"role": "user", "content": prompt}
+            ]
+
+            response = await self.llm.chat(
+                messages=messages,
+                temperature=0.2,
+                max_tokens=3000
+            )
+
+            content = self.llm.extract_message_content(response)
+            logger.info(f"字段 {field.name} 审核返回: {content[:300]}")
+
+            # 解析 JSON
+            import json
+            import re
+
+            cleaned = content.strip()
+            cleaned = re.sub(r'^```json\s*', '', cleaned, flags=re.MULTILINE)
+            cleaned = re.sub(r'^```\s*', '', cleaned, flags=re.MULTILINE)
+            cleaned = cleaned.strip()
+
+            json_start = -1
+            for i, c in enumerate(cleaned):
+                if c == '{':
+                    json_start = i
+                    break
+
+            if json_start == -1:
+                logger.warning(f"字段 {field.name} 审核：无法找到 JSON")
+                return None
+
+            json_text = cleaned[json_start:]
+            result = json.loads(json_text)
+
+            is_valid = result.get("is_valid", True)
+            corrected_values = result.get("corrected_values")
+            reason = result.get("reason", "")
+            original_meaning = result.get("original_meaning", "")
+
+            logger.info(f"字段 {field.name} 审核结果: is_valid={is_valid}, reason={reason[:100]}")
+
+            if not is_valid and corrected_values:
+                # 值有问题且有修正建议，使用修正后的值
+                logger.info(f"字段 {field.name} 使用修正后的值: {corrected_values[:5]}")
+                return FillResult(
+                    field=field.name,
+                    values=corrected_values,
+                    value=corrected_values[0] if corrected_values else "",
+                    source=f"AI审核修正: {reason[:100]}",
+                    confidence=0.7
+                )
+            elif not is_valid and original_meaning:
+                # 值有问题但无修正，记录原始含义供用户参考
+                logger.info(f"字段 {field.name} 审核发现问题: {original_meaning}")
+                return FillResult(
+                    field=field.name,
+                    values=extracted_values,
+                    value=extracted_values[0] if extracted_values else "",
+                    source=f"AI审核疑问: {original_meaning[:100]}",
+                    confidence=0.5
+                )
+
+            # 验证通过，返回 None 表示使用原结果
+            return None
+
+        except Exception as e:
+            logger.error(f"字段 {field.name} 审核失败: {str(e)}")
+            return None
 
     def _build_context_text(self, source_docs: List[SourceDocument], field_name: str = None, max_length: int = 8000) -> str:
         """
@@ -1580,30 +1727,35 @@ class TemplateFillService:
             import pandas as pd
 
             # 读取 Excel 内容检查是否为空
+            content_sample = ""
             if file_type in ["xlsx", "xls"]:
                 df = pd.read_excel(file_path, header=None)
                 if df.shape[0] == 0 or df.shape[1] == 0:
                     logger.info("Excel 表格为空")
-                    # 生成默认字段
-                    return [TemplateField(
-                        cell=self._column_to_cell(i),
-                        name=f"字段{i+1}",
-                        field_type="text",
-                        required=False,
-                        hint="请填写此字段"
-                    ) for i in range(5)]
-
-                # 表格有数据但没有表头
-                if df.shape[1] > 0:
-                    # 读取第一行作为参考，看是否为空
-                    first_row = df.iloc[0].tolist() if len(df) > 0 else []
-                    if not any(pd.notna(v) and str(v).strip() != '' for v in first_row):
-                        # 第一行为空，AI 生成表头
-                        content_sample = df.iloc[:10].to_string() if len(df) >= 10 else df.to_string()
-                    else:
-                        content_sample = df.to_string()
+                    # 即使 Excel 为空，如果有源文档，仍然尝试使用 AI 生成表头
+                    if not source_contents:
+                        logger.info("Excel 为空且没有源文档，使用默认字段名")
+                        return [TemplateField(
+                            cell=self._column_to_cell(i),
+                            name=f"字段{i+1}",
+                            field_type="text",
+                            required=False,
+                            hint="请填写此字段"
+                        ) for i in range(5)]
+                    # 有源文档，继续调用 AI 生成表头
+                    logger.info("Excel 为空但有源文档，使用源文档内容生成表头...")
                 else:
-                    content_sample = ""
+                    # 表格有数据但没有表头
+                    if df.shape[1] > 0:
+                        # 读取第一行作为参考，看是否为空
+                        first_row = df.iloc[0].tolist() if len(df) > 0 else []
+                        if not any(pd.notna(v) and str(v).strip() != '' for v in first_row):
+                            # 第一行为空，AI 生成表头
+                            content_sample = df.iloc[:10].to_string() if len(df) >= 10 else df.to_string()
+                        else:
+                            content_sample = df.to_string()
+                    else:
+                        content_sample = ""
 
             # 调用 AI 生成表头
             # 根据源文档内容生成表头
@@ -1641,21 +1793,21 @@ class TemplateFillService:
 
             prompt = f"""你是一个专业的表格设计助手。请根据源文档内容生成合适的表格表头字段。
 
-任务：用户有一些源文档（可能包含表格数据、统计信息等），需要填写到表格中。请分析源文档内容，生成适合的表头字段。
+任务：用户有一些源文档（包含表格数据），需要填写到空白表格模板中。源文档中的表格如下：
 
 {source_info}
 
-请生成5-10个简洁的表头字段名，这些字段应该：
-1. 简洁明了，易于理解
-2. 适合作为表格列标题
-3. 直接对应源文档中的关键数据项
-4. 字段之间有明显的区分度
+【重要要求】
+1. 请仔细阅读上面的源文档表格，找出所有不同的列名（如"产品名称"、"1995年产量"、"按资产总额计算(%)"等）
+2. 直接使用这些实际的列名作为表头字段名，不要生成新的或同义词
+3. 如果一个源文档有多个表格，请为每个表格选择合适的列名
+4. 生成3-8个表头字段，优先选择数据量大的表格的列
 
 请严格按照以下 JSON 格式输出（只需输出 JSON，不要其他内容）：
 {{
     "fields": [
-        {{"name": "字段名1", "hint": "字段说明提示1"}},
-        {{"name": "字段名2", "hint": "字段说明提示2"}}
+        {{"name": "实际列名1", "hint": "对该列的说明"}},
+        {{"name": "实际列名2", "hint": "对该列的说明"}}
     ]
 }}
 """

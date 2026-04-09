@@ -23,6 +23,44 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/templates", tags=["表格模板"])
 
 
+# ==================== 辅助函数 ====================
+
+async def update_task_status(
+    task_id: str,
+    status: str,
+    progress: int = 0,
+    message: str = "",
+    result: dict = None,
+    error: str = None
+):
+    """
+    更新任务状态，同时写入 Redis 和 MongoDB
+    """
+    from app.core.database import redis_db
+
+    meta = {"progress": progress, "message": message}
+    if result:
+        meta["result"] = result
+    if error:
+        meta["error"] = error
+
+    try:
+        await redis_db.set_task_status(task_id, status, meta)
+    except Exception as e:
+        logger.warning(f"Redis 任务状态更新失败: {e}")
+
+    try:
+        await mongodb.update_task(
+            task_id=task_id,
+            status=status,
+            message=message,
+            result=result,
+            error=error
+        )
+    except Exception as e:
+        logger.warning(f"MongoDB 任务状态更新失败: {e}")
+
+
 # ==================== 请求/响应模型 ====================
 
 class TemplateFieldRequest(BaseModel):
@@ -244,6 +282,17 @@ async def upload_joint_template(
         # 3. 异步处理源文档到MongoDB
         task_id = str(uuid.uuid4())
         if source_file_info:
+            # 保存任务记录到 MongoDB
+            try:
+                await mongodb.insert_task(
+                    task_id=task_id,
+                    task_type="source_process",
+                    status="pending",
+                    message=f"开始处理 {len(source_file_info)} 个源文档"
+                )
+            except Exception as mongo_err:
+                logger.warning(f"MongoDB 保存任务记录失败: {mongo_err}")
+
             background_tasks.add_task(
                 process_source_documents,
                 task_id=task_id,
@@ -282,12 +331,10 @@ async def upload_joint_template(
 
 async def process_source_documents(task_id: str, files: List[dict]):
     """异步处理源文档，存入MongoDB"""
-    from app.core.database import redis_db
-
     try:
-        await redis_db.set_task_status(
+        await update_task_status(
             task_id, status="processing",
-            meta={"progress": 0, "message": "开始处理源文档"}
+            progress=0, message="开始处理源文档"
         )
 
         doc_ids = []
@@ -316,22 +363,24 @@ async def process_source_documents(task_id: str, files: List[dict]):
                 logger.error(f"源文档处理异常: {file_info['filename']}, error: {str(e)}")
 
             progress = int((i + 1) / len(files) * 100)
-            await redis_db.set_task_status(
+            await update_task_status(
                 task_id, status="processing",
-                meta={"progress": progress, "message": f"已处理 {i+1}/{len(files)}"}
+                progress=progress, message=f"已处理 {i+1}/{len(files)}"
             )
 
-        await redis_db.set_task_status(
+        await update_task_status(
             task_id, status="success",
-            meta={"progress": 100, "message": "源文档处理完成", "doc_ids": doc_ids}
+            progress=100, message="源文档处理完成",
+            result={"doc_ids": doc_ids}
         )
         logger.info(f"所有源文档处理完成: {len(doc_ids)}个")
 
     except Exception as e:
         logger.error(f"源文档批量处理失败: {str(e)}")
-        await redis_db.set_task_status(
+        await update_task_status(
             task_id, status="failure",
-            meta={"error": str(e)}
+            progress=0, message="源文档处理失败",
+            error=str(e)
         )
 
 
