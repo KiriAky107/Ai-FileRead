@@ -155,20 +155,17 @@ async def upload_joint_template(
                 )
 
     try:
-        # 1. 保存模板文件并提取字段
+        # 1. 保存模板文件
         template_content = await template_file.read()
         template_path = file_service.save_uploaded_file(
             template_content,
             template_file.filename,
             subfolder="templates"
         )
-        template_fields = await template_fill_service.get_template_fields_from_file(
-            template_path,
-            template_ext
-        )
 
-        # 2. 处理源文档 - 保存文件
+        # 2. 保存并解析源文档 - 提取内容用于生成表头
         source_file_info = []
+        source_contents = []
         for sf in source_files:
             if sf.filename:
                 sf_content = await sf.read()
@@ -183,6 +180,28 @@ async def upload_joint_template(
                     "filename": sf.filename,
                     "ext": sf_ext
                 })
+                # 解析源文档获取内容（用于 AI 生成表头）
+                try:
+                    from app.core.document_parser import ParserFactory
+                    parser = ParserFactory.get_parser(sf_path)
+                    parse_result = parser.parse(sf_path)
+                    if parse_result.success and parse_result.data:
+                        source_contents.append({
+                            "filename": sf.filename,
+                            "doc_type": sf_ext,
+                            "content": parse_result.data.get("content", "")[:5000] if parse_result.data.get("content") else "",
+                            "titles": parse_result.data.get("titles", [])[:10] if parse_result.data.get("titles") else [],
+                            "tables_count": len(parse_result.data.get("tables", [])) if parse_result.data.get("tables") else 0
+                        })
+                except Exception as e:
+                    logger.warning(f"解析源文档失败 {sf.filename}: {e}")
+
+        # 3. 根据源文档内容生成表头
+        template_fields = await template_fill_service.get_template_fields_from_file(
+            template_path,
+            template_ext,
+            source_contents=source_contents  # 传递源文档内容
+        )
 
         # 3. 异步处理源文档到MongoDB
         task_id = str(uuid.uuid4())

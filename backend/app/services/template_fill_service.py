@@ -529,7 +529,8 @@ class TemplateFillService:
     async def get_template_fields_from_file(
         self,
         file_path: str,
-        file_type: str = "xlsx"
+        file_type: str = "xlsx",
+        source_contents: List[dict] = None
     ) -> List[TemplateField]:
         """
         从模板文件提取字段定义
@@ -537,11 +538,14 @@ class TemplateFillService:
         Args:
             file_path: 模板文件路径
             file_type: 文件类型 (xlsx/xls/docx)
+            source_contents: 源文档内容列表（用于 AI 生成表头）
 
         Returns:
             字段列表
         """
         fields = []
+        if source_contents is None:
+            source_contents = []
 
         try:
             if file_type in ["xlsx", "xls"]:
@@ -557,8 +561,8 @@ class TemplateFillService:
             )
 
             if needs_ai_generation:
-                logger.info(f"模板表头为空或自动生成，尝试 AI 生成表头... (fields={len(fields)})")
-                ai_fields = await self._generate_fields_with_ai(file_path, file_type)
+                logger.info(f"模板表头为空或自动生成，尝试 AI 生成表头... (fields={len(fields)}, source_docs={len(source_contents)})")
+                ai_fields = await self._generate_fields_with_ai(file_path, file_type, source_contents)
                 if ai_fields:
                     fields = ai_fields
                     logger.info(f"AI 生成表头成功: {len(fields)} 个字段")
@@ -1225,7 +1229,8 @@ class TemplateFillService:
     async def _generate_fields_with_ai(
         self,
         file_path: str,
-        file_type: str
+        file_type: str,
+        source_contents: List[dict] = None
     ) -> Optional[List[TemplateField]]:
         """
         使用 AI 为空表生成表头字段
@@ -1269,15 +1274,36 @@ class TemplateFillService:
                     content_sample = ""
 
             # 调用 AI 生成表头
-            prompt = f"""你是一个专业的表格设计助手。请为以下空白表格生成合适的表头字段。
+            # 根据源文档内容生成表头
+            source_info = ""
+            if source_contents:
+                source_info = "\n\n【源文档内容摘要】（根据以下文档内容生成表头）：\n"
+                for idx, src in enumerate(source_contents[:5]):  # 最多5个源文档
+                    filename = src.get("filename", f"文档{idx+1}")
+                    doc_type = src.get("doc_type", "unknown")
+                    content = src.get("content", "")[:3000]  # 限制内容长度
+                    titles = src.get("titles", [])[:10]  # 最多10个标题
+                    tables_count = src.get("tables_count", 0)
 
-表格内容预览：
-{content_sample[:2000] if content_sample else "空白表格"}
+                    source_info += f"\n--- 文档 {idx+1}: {filename} ({doc_type}) ---\n"
+                    if titles:
+                        source_info += f"【章节标题】: {', '.join([t.get('text', '') for t in titles[:5]])}\n"
+                    if tables_count > 0:
+                        source_info += f"【包含表格数】: {tables_count}\n"
+                    if content:
+                        source_info += f"【内容预览】: {content[:1500]}...\n"
+
+            prompt = f"""你是一个专业的表格设计助手。请根据源文档内容生成合适的表格表头字段。
+
+任务：用户有一些源文档（可能包含表格数据、统计信息等），需要填写到表格中。请分析源文档内容，生成适合的表头字段。
+
+{source_info}
 
 请生成5-10个简洁的表头字段名，这些字段应该：
 1. 简洁明了，易于理解
 2. 适合作为表格列标题
-3. 之间有明显的区分度
+3. 直接对应源文档中的关键数据项
+4. 字段之间有明显的区分度
 
 请严格按照以下 JSON 格式输出（只需输出 JSON，不要其他内容）：
 {{
