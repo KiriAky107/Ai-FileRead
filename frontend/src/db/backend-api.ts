@@ -657,6 +657,46 @@ export const backendApi = {
   },
 
   /**
+   * 联合上传模板和源文档
+   */
+  async uploadTemplateAndSources(
+    templateFile: File,
+    sourceFiles: File[]
+  ): Promise<{
+    success: boolean;
+    template_id: string;
+    filename: string;
+    file_type: string;
+    fields: TemplateField[];
+    field_count: number;
+    source_file_paths: string[];
+    source_filenames: string[];
+    task_id: string;
+  }> {
+    const formData = new FormData();
+    formData.append('template_file', templateFile);
+    sourceFiles.forEach(file => formData.append('source_files', file));
+
+    const url = `${BACKEND_BASE_URL}/templates/upload-joint`;
+
+    try {
+      const response = await fetch(url, {
+        method: 'POST',
+        body: formData,
+      });
+
+      if (!response.ok) {
+        const error = await response.json();
+        throw new Error(error.detail || '联合上传失败');
+      }
+      return await response.json();
+    } catch (error) {
+      console.error('联合上传失败:', error);
+      throw error;
+    }
+  },
+
+  /**
    * 执行表格填写
    */
   async fillTemplate(
