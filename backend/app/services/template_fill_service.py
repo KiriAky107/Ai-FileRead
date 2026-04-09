@@ -168,16 +168,44 @@ class TemplateFillService:
                         sd = doc.get("structured_data", {})
                         sd_keys = list(sd.keys()) if sd else []
                         logger.info(f"从MongoDB加载文档: {doc_id}, doc_type={doc.get('doc_type')}, structured_data keys={sd_keys}")
+
+                        # 如果 structured_data 为空，但有 file_path，尝试重新解析文件
+                        doc_content = doc.get("content", "")
+                        if not sd or (not sd.get("tables") and not sd.get("headers") and not sd.get("rows")):
+                            file_path = doc.get("metadata", {}).get("file_path")
+                            if file_path:
+                                logger.info(f"  structured_data 为空，尝试重新解析文件: {file_path}")
+                                try:
+                                    parser = ParserFactory.get_parser(file_path)
+                                    result = parser.parse(file_path)
+                                    if result.success and result.data:
+                                        if result.data.get("structured_data"):
+                                            sd = result.data.get("structured_data")
+                                            logger.info(f"  重新解析成功，structured_data keys: {list(sd.keys())}")
+                                        elif result.data.get("tables"):
+                                            sd = {"tables": result.data.get("tables", [])}
+                                            logger.info(f"  使用 data.tables，tables数量: {len(sd.get('tables', []))}")
+                                        elif result.data.get("rows"):
+                                            sd = result.data
+                                            logger.info(f"  使用 data.rows 格式")
+                                        if result.data.get("content"):
+                                            doc_content = result.data.get("content", "")
+                                    else:
+                                        logger.warning(f"  重新解析失败: {result.error if result else 'unknown'}")
+                                except Exception as parse_err:
+                                    logger.error(f"  重新解析文件异常: {str(parse_err)}")
+
                         if sd.get("tables"):
                             logger.info(f"  tables数量: {len(sd.get('tables', []))}")
                             if sd["tables"]:
                                 first_table = sd["tables"][0]
                                 logger.info(f"  第一表格: headers={first_table.get('headers', [])[:3]}..., rows数量={len(first_table.get('rows', []))}")
+
                         source_docs.append(SourceDocument(
                             doc_id=doc_id,
                             filename=doc.get("metadata", {}).get("original_filename", "unknown"),
                             doc_type=doc.get("doc_type", "unknown"),
-                            content=doc.get("content", ""),
+                            content=doc_content,
                             structured_data=sd
                         ))
                 except Exception as e:
@@ -1348,27 +1376,37 @@ class TemplateFillService:
                     hint_text = f"{user_hint}。{hint_text}"
 
                 # 构建针对字段提取的提示词
-                prompt = f"""你是一个专业的数据提取专家。请从以下文档内容中提取与"{field.name}"相关的所有数据。
+                prompt = f"""你是一个专业的数据提取专家。请从以下文档内容中提取与"{field.name}"完全匹配的数据。
 
-字段提示: {hint_text}
+【重要】字段名: "{field.name}"
+【重要】字段提示: {hint_text}
+
+请严格按照以下步骤操作：
+1. 在文档中搜索与"{field.name}"完全相同或高度相关的关键词
+2. 找到后，提取该关键词后的数值（注意：只要数值，不要单位）
+3. 如果是表格中的数据，直接提取该单元格的数值
+4. 如果是段落描述，在关键词附近找数值
+
+【重要】返回值规则：
+- 只返回纯数值，不要单位（如 "4.9" 而不是 "4.9万亿元"）
+- 如果原文是"4.9万亿元"，返回 "4.9"
+- 如果原文是"144000万册"，返回 "144000"
+- 如果是百分比如"增长7.7%"，返回 "7.7"
+- 如果没有找到完全匹配的数据，返回空数组
 
 文档内容：
-{doc.content[:8000] if doc.content else ""}
-
-请完成以下任务：
-1. 仔细阅读文档，找出所有与"{field.name}"相关的数据
-2. 如果文档中有表格数据，提取表格中的对应列值
-3. 如果文档中是段落描述，提取其中的关键数值或结论
-4. 返回提取的所有值（可能多个，用数组存储）
+{doc.content[:10000] if doc.content else ""}
 
 请用严格的 JSON 格式返回：
 {{
-    "values": ["值1", "值2", ...],
+    "values": ["值1", "值2", ...],  // 只填数值，不要单位
     "source": "数据来源说明",
     "confidence": 0.0到1.0之间的置信度
 }}
 
-如果没有找到相关数据，返回空数组 values: []"""
+示例：
+- 如果字段是"图书馆总藏量（万册）"且文档说"图书总藏量14.4亿册"，返回 values: ["144000"]
+- 如果字段是"国内旅游收入（亿元）"且文档说"国内旅游收入4.9万亿元"，返回 values: ["49000"]"""
 
                 messages = [
                     {"role": "system", "content": "你是一个专业的数据提取助手，擅长从政府统计公报等文档中提取数据。请严格按JSON格式输出。"},
@@ -1378,7 +1416,7 @@ class TemplateFillService:
                 response = await self.llm.chat(
                     messages=messages,
                     temperature=0.1,
-                    max_tokens=5000
+                    max_tokens=4000
                 )
 
                 content = self.llm.extract_message_content(response)
