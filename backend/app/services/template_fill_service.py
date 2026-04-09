@@ -10,6 +10,7 @@ from typing import Any, Dict, List, Optional
 from app.core.database import mongodb
 from app.services.llm_service import llm_service
 from app.core.document_parser import ParserFactory
+from app.services.markdown_ai_service import markdown_ai_service
 
 logger = logging.getLogger(__name__)
 
@@ -233,6 +234,12 @@ class TemplateFillService:
                 confidence=1.0
             )
 
+        # 无法直接从结构化数据提取，尝试 AI 分析非结构化文档
+        ai_structured = await self._analyze_unstructured_docs_for_fields(source_docs, field, user_hint)
+        if ai_structured:
+            logger.info(f"✅ 字段 {field.name} 通过 AI 分析结构化提取到数据")
+            return ai_structured
+
         # 无法从结构化数据提取，使用 LLM
         logger.info(f"字段 {field.name} 无法直接从结构化数据提取，使用 LLM...")
 
@@ -244,18 +251,20 @@ class TemplateFillService:
         if user_hint:
             hint_text = f"{user_hint}。{hint_text}"
 
-        prompt = f"""你是一个专业的数据提取专家。请从以下文档内容中提取"{field.name}"字段的所有行数据。
+        prompt = f"""你是一个专业的数据提取专家。请从以下文档内容中提取与"{field.name}"相关的所有信息。
 
-参考文档内容（已提取" {field.name}"列的数据）：
+提示词: {hint_text}
+
+文档内容：
 {context_text}
 
-请提取上述所有行的" {field.name}"值，存入数组。每一行对应数组中的一个元素。
-如果某行该字段为空，请用空字符串""占位。
+请分析文档结构（可能包含表格、标题段落等），找出所有与"{field.name}"相关的数据。
+如果找到表格数据，返回多行值；如果是非表格段落，提取关键信息。
 
-请严格按照以下 JSON 格式输出，不要添加任何解释：
+请严格按照以下 JSON 格式输出：
 {{
-    "values": ["第1行的值", "第2行的值", "第3行的值", ...],
-    "source": "数据来源的文档描述",
+    "values": ["第1行的值", "第2行的值", ...],
+    "source": "数据来源描述",
     "confidence": 0.0到1.0之间的置信度
 }}
 """
@@ -473,6 +482,29 @@ class TemplateFillService:
                             elif isinstance(row, list):
                                 doc_content += " | ".join(str(cell) for cell in row) + "\n"
                             row_count += 1
+            elif doc.structured_data and doc.structured_data.get("tables"):
+                # Markdown 表格格式: {tables: [{headers: [...], rows: [...]}]}
+                tables = doc.structured_data.get("tables", [])
+                for table in tables:
+                    if isinstance(table, dict):
+                        headers = table.get("headers", [])
+                        rows = table.get("rows", [])
+                        if rows and headers:
+                            doc_content += f"\n【文档: {doc.filename} - 表格】\n"
+                            doc_content += " | ".join(str(h) for h in headers) + "\n"
+                            for row in rows:
+                                if isinstance(row, list):
+                                    doc_content += " | ".join(str(cell) for cell in row) + "\n"
+                                row_count += 1
+                # 如果有标题结构，也添加上下文
+                if doc.structured_data.get("titles"):
+                    titles = doc.structured_data.get("titles", [])
+                    doc_content += f"\n【文档章节结构】\n"
+                    for title in titles[:20]:  # 限制前20个标题
+                        doc_content += f"{'#' * title.get('level', 1)} {title.get('text', '')}\n"
+                # 如果没有提取到表格内容，使用纯文本
+                if not doc_content.strip():
+                    doc_content = doc.content[:5000] if doc.content else ""
             elif doc.content:
                 doc_content = doc.content[:5000]
 
@@ -718,6 +750,21 @@ class TemplateFillService:
                 if values:
                     all_values.extend(values)
                     logger.info(f"从文档 {doc.filename} 提取到 {len(values)} 个值")
+                    break
+
+            # 处理 Markdown 表格格式: {tables: [{headers: [...], rows: [...]}]}
+            elif structured.get("tables"):
+                tables = structured.get("tables", [])
+                for table in tables:
+                    if isinstance(table, dict):
+                        headers = table.get("headers", [])
+                        rows = table.get("rows", [])
+                        values = self._extract_column_values(rows, headers, field_name)
+                        if values:
+                            all_values.extend(values)
+                            logger.info(f"从 Markdown 表格提取到 {len(values)} 个值")
+                            break
+                if all_values:
                     break
 
         return all_values
@@ -1004,6 +1051,145 @@ class TemplateFillService:
         # 如果无法匹配，返回原始内容
         content = text.strip()[:500] if text.strip() else ""
         return [content] if content else []
+
+    async def _analyze_unstructured_docs_for_fields(
+        self,
+        source_docs: List[SourceDocument],
+        field: TemplateField,
+        user_hint: Optional[str] = None
+    ) -> Optional[FillResult]:
+        """
+        对非结构化文档进行 AI 分析，尝试提取结构化数据
+
+        适用于 Markdown 等没有表格格式的文档，通过 AI 分析提取结构化信息
+
+        Args:
+            source_docs: 源文档列表
+            field: 字段定义
+            user_hint: 用户提示
+
+        Returns:
+            FillResult 如果提取成功，否则返回 None
+        """
+        # 找出非结构化的 Markdown/TXT 文档（没有表格的）
+        unstructured_docs = []
+        for doc in source_docs:
+            if doc.doc_type in ["md", "txt", "markdown"]:
+                # 检查是否有表格
+                has_tables = (
+                    doc.structured_data and
+                    doc.structured_data.get("tables") and
+                    len(doc.structured_data.get("tables", [])) > 0
+                )
+                if not has_tables:
+                    unstructured_docs.append(doc)
+
+        if not unstructured_docs:
+            return None
+
+        logger.info(f"发现 {len(unstructured_docs)} 个非结构化文档，尝试 AI 分析...")
+
+        # 对每个非结构化文档进行 AI 分析
+        for doc in unstructured_docs:
+            try:
+                # 使用 markdown_ai_service 的 statistics 分析类型
+                # 这种类型专门用于政府统计公报等包含数据的文档
+                hint_text = field.hint if field.hint else f"请提取{field.name}的信息"
+                if user_hint:
+                    hint_text = f"{user_hint}。{hint_text}"
+
+                # 构建针对字段提取的提示词
+                prompt = f"""你是一个专业的数据提取专家。请从以下文档内容中提取与"{field.name}"相关的所有数据。
+
+字段提示: {hint_text}
+
+文档内容：
+{doc.content[:8000] if doc.content else ""}
+
+请完成以下任务：
+1. 仔细阅读文档，找出所有与"{field.name}"相关的数据
+2. 如果文档中有表格数据，提取表格中的对应列值
+3. 如果文档中是段落描述，提取其中的关键数值或结论
+4. 返回提取的所有值（可能多个，用数组存储）
+
+请用严格的 JSON 格式返回：
+{{
+    "values": ["值1", "值2", ...],
+    "source": "数据来源说明",
+    "confidence": 0.0到1.0之间的置信度
+}}
+
+如果没有找到相关数据，返回空数组 values: []"""
+
+                messages = [
+                    {"role": "system", "content": "你是一个专业的数据提取助手，擅长从政府统计公报等文档中提取数据。请严格按JSON格式输出。"},
+                    {"role": "user", "content": prompt}
+                ]
+
+                response = await self.llm.chat(
+                    messages=messages,
+                    temperature=0.1,
+                    max_tokens=5000
+                )
+
+                content = self.llm.extract_message_content(response)
+                logger.info(f"AI 分析返回: {content[:500]}")
+
+                # 解析 JSON
+                import json
+                import re
+
+                # 清理 markdown 格式
+                cleaned = content.strip()
+                cleaned = re.sub(r'^```json\s*', '', cleaned, flags=re.MULTILINE)
+                cleaned = re.sub(r'^```\s*', '', cleaned, flags=re.MULTILINE)
+                cleaned = cleaned.strip()
+
+                # 查找 JSON
+                json_start = -1
+                for i, c in enumerate(cleaned):
+                    if c == '{' or c == '[':
+                        json_start = i
+                        break
+
+                if json_start == -1:
+                    continue
+
+                json_text = cleaned[json_start:]
+                try:
+                    result = json.loads(json_text)
+                    values = self._extract_values_from_json(result)
+                    if values:
+                        return FillResult(
+                            field=field.name,
+                            values=values,
+                            value=values[0] if values else "",
+                            source=f"AI分析: {doc.filename}",
+                            confidence=result.get("confidence", 0.8)
+                        )
+                except json.JSONDecodeError:
+                    # 尝试修复 JSON
+                    fixed = self._fix_json(json_text)
+                    if fixed:
+                        try:
+                            result = json.loads(fixed)
+                            values = self._extract_values_from_json(result)
+                            if values:
+                                return FillResult(
+                                    field=field.name,
+                                    values=values,
+                                    value=values[0] if values else "",
+                                    source=f"AI分析: {doc.filename}",
+                                    confidence=result.get("confidence", 0.8)
+                                )
+                        except json.JSONDecodeError:
+                            pass
+
+            except Exception as e:
+                logger.warning(f"AI 分析文档 {doc.filename} 失败: {str(e)}")
+                continue
+
+        return None
 
 
 # ==================== 全局单例 ====================
