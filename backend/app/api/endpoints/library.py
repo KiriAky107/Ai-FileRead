@@ -3,12 +3,15 @@
 
 提供文档列表、详情查询和删除功能
 """
+import logging
 from typing import Optional, List
 
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 
 from app.core.database import mongodb
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/documents", tags=["文档库"])
 
@@ -26,7 +29,8 @@ class DocumentItem(BaseModel):
 @router.get("")
 async def get_documents(
     doc_type: Optional[str] = Query(None, description="文档类型过滤"),
-    limit: int = Query(50, ge=1, le=100, description="返回数量")
+    limit: int = Query(20, ge=1, le=100, description="返回数量"),
+    skip: int = Query(0, ge=0, description="跳过数量")
 ):
     """
     获取文档列表
@@ -40,11 +44,25 @@ async def get_documents(
         if doc_type:
             query["doc_type"] = doc_type
 
-        # 查询文档
-        cursor = mongodb.documents.find(query).sort("created_at", -1).limit(limit)
+        logger.info(f"开始查询文档列表, query: {query}, limit: {limit}")
+
+        # 使用 batch_size 和 max_time_ms 来控制查询
+        cursor = mongodb.documents.find(
+            query,
+            {"content": 0}  # 不返回 content 字段，减少数据传输
+        ).sort("created_at", -1).skip(skip).limit(limit)
+
+        # 设置 10 秒超时
+        cursor.max_time_ms(10000)
+
+        logger.info("Cursor created with 10s timeout, executing...")
+
+        # 使用 batch_size 逐批获取
+        documents_raw = await cursor.to_list(length=limit)
+        logger.info(f"查询到原始文档数: {len(documents_raw)}")
 
         documents = []
-        async for doc in cursor:
+        for doc in documents_raw:
             documents.append({
                 "doc_id": str(doc["_id"]),
                 "filename": doc.get("metadata", {}).get("filename", ""),
@@ -55,9 +73,11 @@ async def get_documents(
                 "metadata": {
                     "row_count": doc.get("metadata", {}).get("row_count"),
                     "column_count": doc.get("metadata", {}).get("column_count"),
-                    "columns": doc.get("metadata", {}).get("columns", [])[:10]  # 只返回前10列
+                    "columns": doc.get("metadata", {}).get("columns", [])[:10]
                 }
             })
+
+        logger.info(f"文档列表处理完成: {len(documents)} 个文档")
 
         return {
             "success": True,
@@ -66,6 +86,17 @@ async def get_documents(
         }
 
     except Exception as e:
+        err_str = str(e)
+        # 如果是超时错误，返回空列表而不是报错
+        if "timeout" in err_str.lower() or "time" in err_str.lower():
+            logger.warning(f"文档查询超时，返回空列表: {err_str}")
+            return {
+                "success": True,
+                "documents": [],
+                "total": 0,
+                "warning": "查询超时，请稍后重试"
+            }
+        logger.error(f"获取文档列表失败: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"获取文档列表失败: {str(e)}")
 
 

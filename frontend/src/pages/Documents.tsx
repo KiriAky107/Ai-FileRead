@@ -235,6 +235,7 @@ const Documents: React.FC = () => {
         if (result.success) {
           toast.success(`解析成功: ${file.name}`);
           setParseResult(result);
+          loadDocuments(); // 刷新文档列表
           if (result.metadata?.sheet_count === 1) {
             setExpandedSheet(Object.keys(result.data?.sheets || {})[0] || null);
           }

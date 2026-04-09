@@ -11,6 +11,7 @@ import io
 from app.services.file_service import file_service
 from app.core.document_parser import XlsxParser
 from app.services.table_rag_service import table_rag_service
+from app.core.database import mongodb
 
 logger = logging.getLogger(__name__)
 
@@ -94,6 +95,56 @@ async def upload_excel(
                 logger.warning(f"Excel存储到MySQL失败: {store_result.get('error')}")
         except Exception as e:
             logger.error(f"Excel存储到MySQL异常: {str(e)}", exc_info=True)
+
+        # 存储到 MongoDB（用于文档列表展示）
+        try:
+            content = ""
+            # 构建文本内容用于展示
+            if result.data:
+                if isinstance(result.data, dict):
+                    # 单 sheet 格式: {columns, rows, ...}
+                    if 'columns' in result.data and 'rows' in result.data:
+                        content += f"Sheet: {result.metadata.get('current_sheet', 'Sheet1') if result.metadata else 'Sheet1'}\n"
+                        content += ", ".join(str(h) for h in result.data['columns']) + "\n"
+                        for row in result.data['rows'][:100]:
+                            if isinstance(row, dict):
+                                content += ", ".join(str(row.get(col, "")) for col in result.data['columns']) + "\n"
+                            elif isinstance(row, list):
+                                content += ", ".join(str(cell) for cell in row) + "\n"
+                        content += f"... (共 {len(result.data['rows'])} 行)\n\n"
+                    # 多 sheet 格式: {sheets: {sheet_name: {columns, rows}}}
+                    elif 'sheets' in result.data:
+                        for sheet_name_key, sheet_data in result.data['sheets'].items():
+                            if isinstance(sheet_data, dict) and 'columns' in sheet_data and 'rows' in sheet_data:
+                                content += f"Sheet: {sheet_name_key}\n"
+                                content += ", ".join(str(h) for h in sheet_data['columns']) + "\n"
+                                for row in sheet_data['rows'][:100]:
+                                    if isinstance(row, dict):
+                                        content += ", ".join(str(row.get(col, "")) for col in sheet_data['columns']) + "\n"
+                                    elif isinstance(row, list):
+                                        content += ", ".join(str(cell) for cell in row) + "\n"
+                                content += f"... (共 {len(sheet_data['rows'])} 行)\n\n"
+
+            doc_metadata = {
+                "filename": saved_path.split("/")[-1] if "/" in saved_path else saved_path.split("\\")[-1],
+                "original_filename": file.filename,
+                "saved_path": saved_path,
+                "file_size": len(content),
+                "row_count": result.metadata.get('row_count', 0) if result.metadata else 0,
+                "column_count": result.metadata.get('column_count', 0) if result.metadata else 0,
+                "columns": result.metadata.get('columns', []) if result.metadata else [],
+                "mysql_table": result.metadata.get('mysql_table') if result.metadata else None,
+                "sheet_count": result.metadata.get('sheet_count', 1) if result.metadata else 1,
+            }
+            await mongodb.insert_document(
+                doc_type="xlsx",
+                content=content,
+                metadata=doc_metadata,
+                structured_data=result.data if result.data else None
+            )
+            logger.info(f"Excel文档已存储到MongoDB: {file.filename}, content长度: {len(content)}")
+        except Exception as e:
+            logger.error(f"Excel存储到MongoDB异常: {str(e)}", exc_info=True)
 
         return result.to_dict()
 

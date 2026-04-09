@@ -38,9 +38,14 @@ class SourceDocument:
 class FillResult:
     """填写结果"""
     field: str
-    value: Any
-    source: str  # 来源文档
+    values: List[Any] = None  # 支持多个值
+    value: Any = ""  # 保留兼容
+    source: str = ""  # 来源文档
     confidence: float = 1.0  # 置信度
+
+    def __post_init__(self):
+        if self.values is None:
+            self.values = []
 
 
 class TemplateFillService:
@@ -71,15 +76,20 @@ class TemplateFillService:
         filled_data = {}
         fill_details = []
 
+        logger.info(f"开始填表: {len(template_fields)} 个字段, {len(source_doc_ids or [])} 个源文档")
+
         # 1. 加载源文档内容
         source_docs = await self._load_source_documents(source_doc_ids, source_file_paths)
+
+        logger.info(f"加载了 {len(source_docs)} 个源文档")
 
         if not source_docs:
             logger.warning("没有找到源文档，填表结果将全部为空")
 
         # 2. 对每个字段进行提取
-        for field in template_fields:
+        for idx, field in enumerate(template_fields):
             try:
+                logger.info(f"提取字段 [{idx+1}/{len(template_fields)}]: {field.name}")
                 # 从源文档中提取字段值
                 result = await self._extract_field_value(
                     field=field,
@@ -87,34 +97,41 @@ class TemplateFillService:
                     user_hint=user_hint
                 )
 
-                # 存储结果
-                filled_data[field.name] = result.value
+                # 存储结果 - 使用 values 数组
+                filled_data[field.name] = result.values if result.values else [""]
                 fill_details.append({
                     "field": field.name,
                     "cell": field.cell,
+                    "values": result.values,
                     "value": result.value,
                     "source": result.source,
                     "confidence": result.confidence
                 })
 
-                logger.info(f"字段 {field.name} 填写完成: {result.value}")
+                logger.info(f"字段 {field.name} 填写完成: {len(result.values)} 个值")
 
             except Exception as e:
-                logger.error(f"填写字段 {field.name} 失败: {str(e)}")
-                filled_data[field.name] = f"[提取失败: {str(e)}]"
+                logger.error(f"填写字段 {field.name} 失败: {str(e)}", exc_info=True)
+                filled_data[field.name] = [f"[提取失败: {str(e)}]"]
                 fill_details.append({
                     "field": field.name,
                     "cell": field.cell,
+                    "values": [f"[提取失败]"],
                     "value": f"[提取失败]",
                     "source": "error",
                     "confidence": 0.0
                 })
 
+        # 计算最大行数
+        max_rows = max(len(v) for v in filled_data.values()) if filled_data else 1
+        logger.info(f"填表完成: {len(filled_data)} 个字段, 最大行数: {max_rows}")
+
         return {
             "success": True,
             "filled_data": filled_data,
             "fill_details": fill_details,
-            "source_doc_count": len(source_docs)
+            "source_doc_count": len(source_docs),
+            "max_rows": max_rows
         }
 
     async def _load_source_documents(
@@ -158,14 +175,22 @@ class TemplateFillService:
                     parser = ParserFactory.get_parser(file_path)
                     result = parser.parse(file_path)
                     if result.success:
+                        # result.data 的结构取决于解析器类型:
+                        # - Excel 单 sheet: {columns: [...], rows: [...], row_count, column_count}
+                        # - Excel 多 sheet: {sheets: {sheet_name: {columns, rows, ...}}}
+                        # - Word/TXT: {content: "...", structured_data: {...}}
+                        doc_data = result.data if result.data else {}
+                        doc_content = doc_data.get("content", "") if isinstance(doc_data, dict) else ""
+                        doc_structured = doc_data if isinstance(doc_data, dict) and "rows" in doc_data or isinstance(doc_data, dict) and "sheets" in doc_data else {}
+
                         source_docs.append(SourceDocument(
                             doc_id=file_path,
                             filename=result.metadata.get("filename", file_path.split("/")[-1]),
                             doc_type=result.metadata.get("extension", "unknown").replace(".", ""),
-                            content=result.data.get("content", ""),
-                            structured_data=result.data.get("structured_data", {})
+                            content=doc_content,
+                            structured_data=doc_structured
                         ))
-                        logger.info(f"从文件加载文档: {file_path}")
+                        logger.info(f"从文件加载文档: {file_path}, content长度: {len(doc_content)}, structured数据: {bool(doc_structured)}")
                 except Exception as e:
                     logger.error(f"从文件加载文档失败 {file_path}: {str(e)}")
 
@@ -196,30 +221,27 @@ class TemplateFillService:
                 confidence=0.0
             )
 
-        # 构建上下文文本
-        context_text = self._build_context_text(source_docs, max_length=8000)
+        # 构建上下文文本 - 传入字段名，只提取该列数据
+        context_text = self._build_context_text(source_docs, field_name=field.name, max_length=8000)
 
         # 构建提示词
         hint_text = field.hint if field.hint else f"请提取{field.name}的信息"
         if user_hint:
             hint_text = f"{user_hint}。{hint_text}"
 
-        prompt = f"""你是一个专业的数据提取专家。请根据以下文档内容，提取指定字段的信息。
+        prompt = f"""你是一个专业的数据提取专家。请从以下文档内容中提取"{field.name}"字段的所有行数据。
 
-需要提取的字段：
-- 字段名称：{field.name}
-- 字段类型：{field.field_type}
-- 填写提示：{hint_text}
-- 是否必填：{'是' if field.required else '否'}
-
-参考文档内容：
+参考文档内容（已提取" {field.name}"列的数据）：
 {context_text}
+
+请提取上述所有行的" {field.name}"值，存入数组。每一行对应数组中的一个元素。
+如果某行该字段为空，请用空字符串""占位。
 
 请严格按照以下 JSON 格式输出，不要添加任何解释：
 {{
-    "value": "提取到的值，如果没有找到则填写空字符串",
-    "source": "数据来源的文档描述（如：来自xxx文档）",
-    "confidence": 0.0到1.0之间的置信度，表示对提取结果的信心程度"
+    "values": ["第1行的值", "第2行的值", "第3行的值", ...],
+    "source": "数据来源的文档描述",
+    "confidence": 0.0到1.0之间的置信度
 }}
 """
 
@@ -242,40 +264,86 @@ class TemplateFillService:
             import json
             import re
 
-            # 尝试提取 JSON
-            json_match = re.search(r'\{[\s\S]*\}', content)
-            if json_match:
-                result = json.loads(json_match.group())
-                return FillResult(
-                    field=field.name,
-                    value=result.get("value", ""),
-                    source=result.get("source", "LLM生成"),
-                    confidence=result.get("confidence", 0.5)
-                )
-            else:
-                # 如果无法解析，返回原始内容
-                return FillResult(
-                    field=field.name,
-                    value=content.strip(),
-                    source="直接提取",
-                    confidence=0.5
-                )
+            # 尝试提取 JSON，使用更严格的匹配
+            extracted_values = []
+            extracted_value = ""
+            extracted_source = "LLM生成"
+            confidence = 0.5
+
+            try:
+                # 方法1: 尝试直接解析整个 content
+                result = json.loads(content)
+                if isinstance(result, dict):
+                    # 优先使用 values 数组格式
+                    if "values" in result and isinstance(result["values"], list):
+                        extracted_values = [str(v) for v in result["values"]]
+                        logger.info(f"字段 {field.name} 使用 values 数组格式: {len(extracted_values)} 个值")
+                    elif "value" in result:
+                        extracted_value = str(result.get("value", ""))
+                        extracted_values = [extracted_value] if extracted_value else []
+                    extracted_source = result.get("source", "LLM生成")
+                    confidence = float(result.get("confidence", 0.5))
+                logger.info(f"字段 {field.name} 直接 JSON 解析成功")
+            except json.JSONDecodeError:
+                # 方法2: 尝试提取 JSON 对象
+                json_match = re.search(r'\{[\s\S]*\}', content)
+                if json_match:
+                    try:
+                        result = json.loads(json_match.group())
+                        if isinstance(result, dict):
+                            # 优先使用 values 数组格式
+                            if "values" in result and isinstance(result["values"], list):
+                                extracted_values = [str(v) for v in result["values"]]
+                                logger.info(f"字段 {field.name} 使用 values 数组格式: {len(extracted_values)} 个值")
+                            elif "value" in result:
+                                extracted_value = str(result.get("value", ""))
+                                extracted_values = [extracted_value] if extracted_value else []
+                            extracted_source = result.get("source", "LLM生成")
+                            confidence = float(result.get("confidence", 0.5))
+                            logger.info(f"字段 {field.name} 正则 JSON 解析成功")
+                        else:
+                            logger.warning(f"字段 {field.name} JSON 不是字典格式")
+                    except json.JSONDecodeError as e:
+                        logger.error(f"字段 {field.name} JSON 解析失败: {str(e)}")
+                        # 如果 JSON 解析失败，尝试从文本中提取
+                        extracted_values = self._extract_values_from_text(content, field.name)
+                        extracted_source = "文本提取"
+                        confidence = 0.3
+                else:
+                    logger.warning(f"字段 {field.name} 未找到 JSON: {content[:200]}")
+                    extracted_values = self._extract_values_from_text(content, field.name)
+                    extracted_source = "文本提取"
+                    confidence = 0.3
+
+            # 如果没有提取到值，返回空
+            if not extracted_values:
+                extracted_values = [""]
+
+            return FillResult(
+                field=field.name,
+                values=extracted_values,
+                value=extracted_values[0] if extracted_values else "",
+                source=extracted_source,
+                confidence=confidence
+            )
 
         except Exception as e:
             logger.error(f"LLM 提取失败: {str(e)}")
             return FillResult(
                 field=field.name,
+                values=[""],
                 value="",
                 source=f"提取失败: {str(e)}",
                 confidence=0.0
             )
 
-    def _build_context_text(self, source_docs: List[SourceDocument], max_length: int = 8000) -> str:
+    def _build_context_text(self, source_docs: List[SourceDocument], field_name: str = None, max_length: int = 8000) -> str:
         """
         构建上下文文本
 
         Args:
             source_docs: 源文档列表
+            field_name: 需要提取的字段名（可选，用于只提取特定列）
             max_length: 最大字符数
 
         Returns:
@@ -287,36 +355,113 @@ class TemplateFillService:
         for doc in source_docs:
             # 优先使用结构化数据（表格），其次使用文本内容
             doc_content = ""
+            row_count = 0
 
-            if doc.structured_data and doc.structured_data.get("tables"):
-                # 如果有表格数据，优先使用
-                tables = doc.structured_data.get("tables", [])
-                for table in tables:
-                    if isinstance(table, dict):
-                        rows = table.get("rows", [])
-                        if rows:
-                            doc_content += f"\n【文档: {doc.filename} 表格数据】\n"
-                            for row in rows[:20]:  # 限制每表最多20行
-                                if isinstance(row, list):
+            if doc.structured_data and doc.structured_data.get("sheets"):
+                # parse_all_sheets 格式: {sheets: {sheet_name: {columns, rows}}}
+                sheets = doc.structured_data.get("sheets", {})
+                for sheet_name, sheet_data in sheets.items():
+                    if isinstance(sheet_data, dict):
+                        columns = sheet_data.get("columns", [])
+                        rows = sheet_data.get("rows", [])
+                        if rows and columns:
+                            doc_content += f"\n【文档: {doc.filename} - {sheet_name}，共 {len(rows)} 行】\n"
+                            # 如果指定了字段名，只提取该列数据
+                            if field_name:
+                                # 查找匹配的列（模糊匹配）
+                                target_col = None
+                                for col in columns:
+                                    if field_name.lower() in str(col).lower() or str(col).lower() in field_name.lower():
+                                        target_col = col
+                                        break
+                                if target_col:
+                                    doc_content += f"列名: {target_col}\n"
+                                    for row_idx, row in enumerate(rows):
+                                        if isinstance(row, dict):
+                                            val = row.get(target_col, "")
+                                        elif isinstance(row, list) and target_col in columns:
+                                            val = row[columns.index(target_col)]
+                                        else:
+                                            val = ""
+                                        doc_content += f"行{row_idx+1}: {val}\n"
+                                        row_count += 1
+                                else:
+                                    # 列名不匹配，输出所有列（但只输出关键列）
+                                    doc_content += " | ".join(str(col) for col in columns) + "\n"
+                                    for row in rows:
+                                        if isinstance(row, dict):
+                                            doc_content += " | ".join(str(row.get(col, "")) for col in columns) + "\n"
+                                        elif isinstance(row, list):
+                                            doc_content += " | ".join(str(cell) for cell in row) + "\n"
+                                        row_count += 1
+                            else:
+                                # 输出所有列和行
+                                doc_content += " | ".join(str(col) for col in columns) + "\n"
+                                for row in rows:
+                                    if isinstance(row, dict):
+                                        doc_content += " | ".join(str(row.get(col, "")) for col in columns) + "\n"
+                                    elif isinstance(row, list):
+                                        doc_content += " | ".join(str(cell) for cell in row) + "\n"
+                                    row_count += 1
+            elif doc.structured_data and doc.structured_data.get("rows"):
+                # Excel 单 sheet 格式: {columns: [...], rows: [...], ...}
+                columns = doc.structured_data.get("columns", [])
+                rows = doc.structured_data.get("rows", [])
+                if rows and columns:
+                    doc_content += f"\n【文档: {doc.filename}，共 {len(rows)} 行】\n"
+                    if field_name:
+                        target_col = None
+                        for col in columns:
+                            if field_name.lower() in str(col).lower() or str(col).lower() in field_name.lower():
+                                target_col = col
+                                break
+                        if target_col:
+                            doc_content += f"列名: {target_col}\n"
+                            for row_idx, row in enumerate(rows):
+                                if isinstance(row, dict):
+                                    val = row.get(target_col, "")
+                                elif isinstance(row, list) and target_col in columns:
+                                    val = row[columns.index(target_col)]
+                                else:
+                                    val = ""
+                                doc_content += f"行{row_idx+1}: {val}\n"
+                                row_count += 1
+                        else:
+                            doc_content += " | ".join(str(col) for col in columns) + "\n"
+                            for row in rows:
+                                if isinstance(row, dict):
+                                    doc_content += " | ".join(str(row.get(col, "")) for col in columns) + "\n"
+                                elif isinstance(row, list):
                                     doc_content += " | ".join(str(cell) for cell in row) + "\n"
-                                elif isinstance(row, dict):
-                                    doc_content += " | ".join(str(v) for v in row.values()) + "\n"
+                                row_count += 1
+                    else:
+                        doc_content += " | ".join(str(col) for col in columns) + "\n"
+                        for row in rows:
+                            if isinstance(row, dict):
+                                doc_content += " | ".join(str(row.get(col, "")) for col in columns) + "\n"
+                            elif isinstance(row, list):
+                                doc_content += " | ".join(str(cell) for cell in row) + "\n"
+                            row_count += 1
             elif doc.content:
-                doc_content = doc.content[:5000]  # 限制文本长度
+                doc_content = doc.content[:5000]
 
             if doc_content:
                 doc_context = f"【文档: {doc.filename} ({doc.doc_type})】\n{doc_content}"
+                logger.info(f"文档 {doc.filename} 上下文长度: {len(doc_context)}, 行数: {row_count}")
                 if total_length + len(doc_context) <= max_length:
                     contexts.append(doc_context)
                     total_length += len(doc_context)
                 else:
-                    # 如果超出长度，截断
                     remaining = max_length - total_length
                     if remaining > 100:
-                        contexts.append(doc_context[:remaining])
+                        doc_context = doc_context[:remaining] + f"\n...（内容被截断）"
+                        contexts.append(doc_context)
+                    logger.warning(f"上下文被截断: {doc.filename}, 总长度: {total_length + len(doc_context)}")
                     break
 
-        return "\n\n".join(contexts) if contexts else "（源文档内容为空）"
+        result = "\n\n".join(contexts) if contexts else "（源文档内容为空）"
+        logger.info(f"最终上下文长度: {len(result)}")
+        return result
 
     async def get_template_fields_from_file(
         self,
@@ -446,6 +591,83 @@ class TemplateFillService:
             result = chr(65 + (col_idx % 26)) + result
             col_idx = col_idx // 26 - 1
         return result
+
+    def _extract_value_from_text(self, text: str, field_name: str) -> str:
+        """
+        从非 JSON 文本中提取字段值（单值版本）
+
+        Args:
+            text: 原始文本
+            field_name: 字段名称
+
+        Returns:
+            提取的值
+        """
+        values = self._extract_values_from_text(text, field_name)
+        return values[0] if values else ""
+
+    def _extract_values_from_text(self, text: str, field_name: str) -> List[str]:
+        """
+        从非 JSON 文本中提取多个字段值
+
+        Args:
+            text: 原始文本
+            field_name: 字段名称
+
+        Returns:
+            提取的值列表
+        """
+        import re
+
+        # 尝试匹配 JSON 数组格式
+        array_match = re.search(r'\[[\s\S]*\]', text)
+        if array_match:
+            try:
+                arr = json.loads(array_match.group())
+                if isinstance(arr, list):
+                    return [str(v) for v in arr if v]
+            except:
+                pass
+
+        # 尝试用分号分割（如果文本中有分号分隔的多个值）
+        if '；' in text or ';' in text:
+            separator = '；' if '；' in text else ';'
+            parts = text.split(separator)
+            values = []
+            for part in parts:
+                part = part.strip()
+                if part and len(part) < 500:
+                    # 清理 Markdown 格式
+                    part = re.sub(r'^\*\*|\*\*$', '', part)
+                    part = re.sub(r'^\*|\*$', '', part)
+                    values.append(part.strip())
+            if values:
+                return values
+
+        # 尝试多种模式匹配
+        patterns = [
+            # "字段名: 值" 或 "字段名：值" 格式
+            rf'{re.escape(field_name)}[：:]\s*(.+?)(?:\n|$)',
+            # "值" 在引号中
+            rf'"value"\s*:\s*"([^"]+)"',
+            # "值" 在单引号中
+            rf"['\"]?value['\"]?\s*:\s*['\"]([^'\"]+)['\"]",
+        ]
+
+        for pattern in patterns:
+            match = re.search(pattern, text, re.DOTALL)
+            if match:
+                value = match.group(1).strip()
+                # 清理 Markdown 格式
+                value = re.sub(r'^\*\*|\*\*$', '', value)
+                value = re.sub(r'^\*|\*$', '', value)
+                value = value.strip()
+                if value and len(value) < 1000:
+                    return [value]
+
+        # 如果无法匹配，返回原始内容
+        content = text.strip()[:500] if text.strip() else ""
+        return [content] if content else []
 
 
 # ==================== 全局单例 ====================

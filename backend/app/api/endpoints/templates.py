@@ -226,9 +226,42 @@ async def export_filled_template(
 
 
 async def _export_to_excel(filled_data: dict, template_id: str) -> StreamingResponse:
-    """导出为 Excel 格式"""
-    # 将字典转换为单行 DataFrame
-    df = pd.DataFrame([filled_data])
+    """导出为 Excel 格式（支持多行）"""
+    import logging
+    logger = logging.getLogger(__name__)
+
+    logger.info(f"导出填表数据: {len(filled_data)} 个字段")
+
+    # 计算最大行数
+    max_rows = 1
+    for k, v in filled_data.items():
+        if isinstance(v, list) and len(v) > max_rows:
+            max_rows = len(v)
+        logger.info(f"  {k}: {type(v).__name__} = {str(v)[:80]}")
+
+    logger.info(f"最大行数: {max_rows}")
+
+    # 构建多行数据
+    rows_data = []
+    for row_idx in range(max_rows):
+        row = {}
+        for col_name, values in filled_data.items():
+            if isinstance(values, list):
+                # 取对应行的值，不足则填空
+                row[col_name] = values[row_idx] if row_idx < len(values) else ""
+            else:
+                # 非列表，整个值填入第一行
+                row[col_name] = values if row_idx == 0 else ""
+        rows_data.append(row)
+
+    df = pd.DataFrame(rows_data)
+
+    # 确保列顺序
+    if not df.empty:
+        df = df[list(filled_data.keys())]
+
+    logger.info(f"DataFrame 形状: {df.shape}")
+    logger.info(f"DataFrame 列: {list(df.columns)}")
 
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
