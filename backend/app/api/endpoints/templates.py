@@ -186,13 +186,51 @@ async def upload_joint_template(
                     parser = ParserFactory.get_parser(sf_path)
                     parse_result = parser.parse(sf_path)
                     if parse_result.success and parse_result.data:
+                        # 获取原始内容
+                        content = parse_result.data.get("content", "")[:5000] if parse_result.data.get("content") else ""
+
+                        # 获取标题（可能在顶层或structured_data内）
+                        titles = parse_result.data.get("titles", [])
+                        if not titles and parse_result.data.get("structured_data"):
+                            titles = parse_result.data.get("structured_data", {}).get("titles", [])
+                        titles = titles[:10] if titles else []
+
+                        # 获取表格数量（可能在顶层或structured_data内）
+                        tables = parse_result.data.get("tables", [])
+                        if not tables and parse_result.data.get("structured_data"):
+                            tables = parse_result.data.get("structured_data", {}).get("tables", [])
+                        tables_count = len(tables) if tables else 0
+
+                        # 获取表格内容摘要（用于 AI 理解源文档结构）
+                        tables_summary = ""
+                        if tables:
+                            tables_summary = "\n【文档中的表格】:\n"
+                            for idx, table in enumerate(tables[:5]):  # 最多5个表格
+                                if isinstance(table, dict):
+                                    headers = table.get("headers", [])
+                                    rows = table.get("rows", [])
+                                    if headers:
+                                        tables_summary += f"表格{idx+1}表头: {', '.join(str(h) for h in headers)}\n"
+                                    if rows:
+                                        tables_summary += f"表格{idx+1}前3行: "
+                                        for row_idx, row in enumerate(rows[:3]):
+                                            if isinstance(row, list):
+                                                tables_summary += " | ".join(str(c) for c in row) + "; "
+                                            elif isinstance(row, dict):
+                                                tables_summary += " | ".join(str(row.get(h, "")) for h in headers if headers) + "; "
+                                        tables_summary += "\n"
+
                         source_contents.append({
                             "filename": sf.filename,
                             "doc_type": sf_ext,
-                            "content": parse_result.data.get("content", "")[:5000] if parse_result.data.get("content") else "",
-                            "titles": parse_result.data.get("titles", [])[:10] if parse_result.data.get("titles") else [],
-                            "tables_count": len(parse_result.data.get("tables", [])) if parse_result.data.get("tables") else 0
+                            "content": content,
+                            "titles": titles,
+                            "tables_count": tables_count,
+                            "tables_summary": tables_summary
                         })
+                        logger.info(f"[DEBUG] source_contents built: filename={sf.filename}, content_len={len(content)}, titles_count={len(titles)}, tables_count={tables_count}")
+                        if tables_summary:
+                            logger.info(f"[DEBUG] tables_summary preview: {tables_summary[:300]}")
                 except Exception as e:
                     logger.warning(f"解析源文档失败 {sf.filename}: {e}")
 
@@ -365,12 +403,23 @@ async def fill_template(
             for f in request.template_fields
         ]
 
+        # 从 template_id 提取文件类型
+        template_file_type = "xlsx"  # 默认类型
+        if request.template_id:
+            ext = request.template_id.split('.')[-1].lower()
+            if ext in ["xlsx", "xls"]:
+                template_file_type = "xlsx"
+            elif ext == "docx":
+                template_file_type = "docx"
+
         # 执行填写
         result = await template_fill_service.fill_template(
             template_fields=fields,
             source_doc_ids=request.source_doc_ids,
             source_file_paths=request.source_file_paths,
-            user_hint=request.user_hint
+            user_hint=request.user_hint,
+            template_id=request.template_id,
+            template_file_type=template_file_type
         )
 
         return result
