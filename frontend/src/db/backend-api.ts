@@ -1188,7 +1188,7 @@ export const aiApi = {
 
     try {
       const response = await fetch(url, {
-        method: 'GET',
+        method: 'POST',
         body: formData,
       });
 

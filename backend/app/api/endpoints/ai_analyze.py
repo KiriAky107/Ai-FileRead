@@ -215,9 +215,12 @@ async def analyze_markdown(
             return result
 
         finally:
-            # 清理临时文件
-            if os.path.exists(tmp_path):
-                os.unlink(tmp_path)
+            # 清理临时文件，确保在所有情况下都能清理
+            try:
+                if tmp_path and os.path.exists(tmp_path):
+                    os.unlink(tmp_path)
+            except Exception as cleanup_error:
+                logger.warning(f"临时文件清理失败: {tmp_path}, error: {cleanup_error}")
 
     except HTTPException:
         raise
@@ -279,8 +282,12 @@ async def analyze_markdown_stream(
             )
 
         finally:
-            if os.path.exists(tmp_path):
-                os.unlink(tmp_path)
+            # 清理临时文件，确保在所有情况下都能清理
+            try:
+                if tmp_path and os.path.exists(tmp_path):
+                    os.unlink(tmp_path)
+            except Exception as cleanup_error:
+                logger.warning(f"临时文件清理失败: {tmp_path}, error: {cleanup_error}")
 
     except HTTPException:
         raise
@@ -289,7 +296,7 @@ async def analyze_markdown_stream(
         raise HTTPException(status_code=500, detail=f"流式分析失败: {str(e)}")
 
 
-@router.get("/analyze/md/outline")
+@router.post("/analyze/md/outline")
 async def get_markdown_outline(
     file: UploadFile = File(...)
 ):
@@ -323,8 +330,12 @@ async def get_markdown_outline(
             result = await markdown_ai_service.extract_outline(tmp_path)
             return result
         finally:
-            if os.path.exists(tmp_path):
-                os.unlink(tmp_path)
+            # 清理临时文件，确保在所有情况下都能清理
+            try:
+                if tmp_path and os.path.exists(tmp_path):
+                    os.unlink(tmp_path)
+            except Exception as cleanup_error:
+                logger.warning(f"临时文件清理失败: {tmp_path}, error: {cleanup_error}")
 
     except Exception as e:
         logger.error(f"获取 Markdown 大纲失败: {str(e)}")

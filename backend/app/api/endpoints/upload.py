@@ -5,6 +5,7 @@ from fastapi import APIRouter, UploadFile, File, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from typing import Optional
 import logging
+import os
 import pandas as pd
 import io
 
@@ -126,7 +127,7 @@ async def upload_excel(
                                 content += f"... (共 {len(sheet_data['rows'])} 行)\n\n"
 
             doc_metadata = {
-                "filename": saved_path.split("/")[-1] if "/" in saved_path else saved_path.split("\\")[-1],
+                "filename": os.path.basename(saved_path),
                 "original_filename": file.filename,
                 "saved_path": saved_path,
                 "file_size": len(content),
@@ -253,7 +254,7 @@ async def export_excel(
         output.seek(0)
 
         # 生成文件名
-        original_name = file_path.split('/')[-1] if '/' in file_path else file_path
+        original_name = os.path.basename(file_path)
         if columns:
             export_name = f"export_{sheet_name or 'data'}_{len(column_list) if columns else 'all'}_cols.xlsx"
         else:
