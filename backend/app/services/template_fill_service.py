@@ -78,11 +78,18 @@ class TemplateFillService:
         fill_details = []
 
         logger.info(f"开始填表: {len(template_fields)} 个字段, {len(source_doc_ids or [])} 个源文档")
+        logger.info(f"source_doc_ids: {source_doc_ids}")
+        logger.info(f"source_file_paths: {source_file_paths}")
 
         # 1. 加载源文档内容
         source_docs = await self._load_source_documents(source_doc_ids, source_file_paths)
 
         logger.info(f"加载了 {len(source_docs)} 个源文档")
+
+        # 打印每个加载的文档的详细信息
+        for i, doc in enumerate(source_docs):
+            logger.info(f"  文档[{i}]: id={doc.doc_id}, filename={doc.filename}, doc_type={doc.doc_type}")
+            logger.info(f"    content长度: {len(doc.content)}, structured_data keys: {list(doc.structured_data.keys()) if doc.structured_data else 'None'}")
 
         if not source_docs:
             logger.warning("没有找到源文档，填表结果将全部为空")
@@ -158,14 +165,49 @@ class TemplateFillService:
                 try:
                     doc = await mongodb.get_document(doc_id)
                     if doc:
+                        sd = doc.get("structured_data", {})
+                        sd_keys = list(sd.keys()) if sd else []
+                        logger.info(f"从MongoDB加载文档: {doc_id}, doc_type={doc.get('doc_type')}, structured_data keys={sd_keys}")
+
+                        # 如果 structured_data 为空，但有 file_path，尝试重新解析文件
+                        doc_content = doc.get("content", "")
+                        if not sd or (not sd.get("tables") and not sd.get("headers") and not sd.get("rows")):
+                            file_path = doc.get("metadata", {}).get("file_path")
+                            if file_path:
+                                logger.info(f"  structured_data 为空，尝试重新解析文件: {file_path}")
+                                try:
+                                    parser = ParserFactory.get_parser(file_path)
+                                    result = parser.parse(file_path)
+                                    if result.success and result.data:
+                                        if result.data.get("structured_data"):
+                                            sd = result.data.get("structured_data")
+                                            logger.info(f"  重新解析成功，structured_data keys: {list(sd.keys())}")
+                                        elif result.data.get("tables"):
+                                            sd = {"tables": result.data.get("tables", [])}
+                                            logger.info(f"  使用 data.tables，tables数量: {len(sd.get('tables', []))}")
+                                        elif result.data.get("rows"):
+                                            sd = result.data
+                                            logger.info(f"  使用 data.rows 格式")
+                                        if result.data.get("content"):
+                                            doc_content = result.data.get("content", "")
+                                    else:
+                                        logger.warning(f"  重新解析失败: {result.error if result else 'unknown'}")
+                                except Exception as parse_err:
+                                    logger.error(f"  重新解析文件异常: {str(parse_err)}")
+
+                        if sd.get("tables"):
+                            logger.info(f"  tables数量: {len(sd.get('tables', []))}")
+                            if sd["tables"]:
+                                first_table = sd["tables"][0]
+                                logger.info(f"  第一表格: headers={first_table.get('headers', [])[:3]}..., rows数量={len(first_table.get('rows', []))}")
+
                         source_docs.append(SourceDocument(
                             doc_id=doc_id,
                             filename=doc.get("metadata", {}).get("original_filename", "unknown"),
                             doc_type=doc.get("doc_type", "unknown"),
-                            content=doc.get("content", ""),
-                            structured_data=doc.get("structured_data", {})
+                            content=doc_content,
+                            structured_data=sd
                         ))
-                        logger.info(f"从MongoDB加载文档: {doc_id}")
                 except Exception as e:
                     logger.error(f"从MongoDB加载文档失败 {doc_id}: {str(e)}")
 
@@ -179,10 +221,48 @@ class TemplateFillService:
                         # result.data 的结构取决于解析器类型:
                         # - Excel 单 sheet: {columns: [...], rows: [...], row_count, column_count}
                         # - Excel 多 sheet: {sheets: {sheet_name: {columns, rows, ...}}}
+                        # - Markdown: {content: "...", tables: [...], structured_data: {tables: [...]}}
                         # - Word/TXT: {content: "...", structured_data: {...}}
                         doc_data = result.data if result.data else {}
                         doc_content = doc_data.get("content", "") if isinstance(doc_data, dict) else ""
-                        doc_structured = doc_data if isinstance(doc_data, dict) and "rows" in doc_data or isinstance(doc_data, dict) and "sheets" in doc_data else {}
+
+                        # 检查并提取 structured_data
+                        doc_structured = {}
+                        if isinstance(doc_data, dict):
+                            logger.info(f"文档 {file_path} doc_data keys: {list(doc_data.keys())}")
+
+                            # Excel 多 sheet
+                            if "sheets" in doc_data:
+                                doc_structured = doc_data
+                                logger.info(f"  -> 使用 Excel 多 sheet 格式")
+                            # Excel 单 sheet 或有 rows 的格式
+                            elif "rows" in doc_data:
+                                doc_structured = doc_data
+                                logger.info(f"  -> 使用 rows 格式，列数: {len(doc_data.get('columns', []))}")
+                            # Markdown 格式：tables 可能直接在 doc_data.tables 或在 structured_data.tables 中
+                            elif "tables" in doc_data and doc_data["tables"]:
+                                # Markdown: tables 直接在 doc_data 中
+                                tables = doc_data["tables"]
+                                first_table = tables[0]
+                                doc_structured = {
+                                    "headers": first_table.get("headers", []),
+                                    "rows": first_table.get("rows", [])
+                                }
+                                logger.info(f"  -> 使用 doc_data.tables 格式，表头: {doc_structured.get('headers', [])[:5]}")
+                            elif "structured_data" in doc_data and isinstance(doc_data["structured_data"], dict):
+                                # Markdown: tables 在 structured_data 中
+                                tables = doc_data["structured_data"].get("tables", [])
+                                if tables:
+                                    first_table = tables[0]
+                                    doc_structured = {
+                                        "headers": first_table.get("headers", []),
+                                        "rows": first_table.get("rows", [])
+                                    }
+                                    logger.info(f"  -> 使用 structured_data.tables 格式，表头: {doc_structured.get('headers', [])[:5]}")
+                                else:
+                                    logger.warning(f"  -> structured_data.tables 为空")
+                            else:
+                                logger.warning(f"  -> 未识别的文档格式，无 structured_data")
 
                         source_docs.append(SourceDocument(
                             doc_id=file_path,
@@ -279,7 +359,7 @@ class TemplateFillService:
             response = await self.llm.chat(
                 messages=messages,
                 temperature=0.1,
-                max_tokens=50000
+                max_tokens=4000
             )
 
             content = self.llm.extract_message_content(response)
@@ -742,7 +822,7 @@ class TemplateFillService:
 
     def _extract_values_from_structured_data(self, source_docs: List[SourceDocument], field_name: str) -> List[str]:
         """
-        从结构化数据（Excel rows）中直接提取指定列的值
+        从结构化数据（Excel rows 或 Markdown tables）中直接提取指定列的值
 
         适用于有 rows 结构的文档数据，无需 LLM 即可提取
 
@@ -754,10 +834,15 @@ class TemplateFillService:
             值列表，如果无法提取则返回空列表
         """
         all_values = []
+        logger.info(f"[_extract_values_from_structured_data] 开始提取字段: {field_name}")
+        logger.info(f"  source_docs 数量: {len(source_docs)}")
 
-        for doc in source_docs:
+        for doc_idx, doc in enumerate(source_docs):
             # 尝试从 structured_data 中提取
             structured = doc.structured_data
+            logger.info(f"  文档[{doc_idx}]: {doc.filename}, structured类型: {type(structured)}, 是否为空: {not bool(structured)}")
+            if structured:
+                logger.info(f"    structured_data keys: {list(structured.keys())}")
 
             if not structured:
                 continue
@@ -774,6 +859,33 @@ class TemplateFillService:
                             all_values.extend(values)
                             logger.info(f"从 sheet {sheet_name} 提取到 {len(values)} 个值")
                             break  # 只用第一个匹配的 sheet
+                if all_values:
+                    break
+
+            # 处理 Markdown 表格格式: {headers: [...], rows: [...], ...}
+            elif structured.get("headers") and structured.get("rows"):
+                headers = structured.get("headers", [])
+                rows = structured.get("rows", [])
+                values = self._extract_values_from_markdown_table(headers, rows, field_name)
+                if values:
+                    all_values.extend(values)
+                    logger.info(f"从 Markdown 文档 {doc.filename} 提取到 {len(values)} 个值")
+                    break
+
+            # 处理 MongoDB 存储的 tables 格式: {tables: [{headers, rows, ...}, ...]}
+            elif structured.get("tables") and isinstance(structured.get("tables"), list):
+                tables = structured.get("tables", [])
+                logger.info(f"  检测到 tables 格式，共 {len(tables)} 个表")
+                for table_idx, table in enumerate(tables):
+                    if isinstance(table, dict):
+                        headers = table.get("headers", [])
+                        rows = table.get("rows", [])
+                        logger.info(f"  表格[{table_idx}]: headers={headers[:3]}..., rows数量={len(rows)}")
+                        values = self._extract_values_from_markdown_table(headers, rows, field_name)
+                        if values:
+                            all_values.extend(values)
+                            logger.info(f"从表格[{table_idx}] 提取到 {len(values)} 个值")
+                            break
                 if all_values:
                     break
 
@@ -804,6 +916,100 @@ class TemplateFillService:
 
         return all_values
 
+    def _extract_values_from_markdown_table(self, headers: List, rows: List, field_name: str) -> List[str]:
+        """
+        从 Markdown 表格中提取指定列的值
+
+        Markdown 表格格式:
+        - headers: ["col1", "col2", ...]
+        - rows: [["val1", "val2", ...], ...]
+
+        Args:
+            headers: 表头列表
+            rows: 数据行列表
+            field_name: 要提取的字段名
+
+        Returns:
+            值列表
+        """
+        if not rows or not headers:
+            logger.warning(f"Markdown 表格为空: headers={headers}, rows={len(rows) if rows else 0}")
+            return []
+
+        # 查找匹配的列索引 - 使用增强的匹配算法
+        target_idx = self._find_best_matching_column(headers, field_name)
+
+        if target_idx is None:
+            logger.warning(f"未找到匹配列: {field_name}, 可用表头: {headers}")
+            return []
+
+        logger.info(f"列匹配成功: {field_name} -> {headers[target_idx]} (索引: {target_idx})")
+
+        values = []
+        for row in rows:
+            if isinstance(row, list) and target_idx < len(row):
+                val = row[target_idx]
+            else:
+                val = ""
+            values.append(self._format_value(val))
+
+        return values
+
+    def _find_best_matching_column(self, headers: List, field_name: str) -> Optional[int]:
+        """
+        查找最佳匹配的列索引
+
+        使用多层匹配策略:
+        1. 精确匹配（忽略大小写）
+        2. 子字符串匹配（字段名在表头中，或表头在字段名中）
+        3. 关键词重叠匹配（中文字符串分割后比对）
+
+        Args:
+            headers: 表头列表
+            field_name: 要匹配的字段名
+
+        Returns:
+            匹配的列索引，找不到返回 None
+        """
+        field_lower = field_name.lower().strip()
+        field_keywords = set(field_lower.replace(" ", "").split())
+
+        best_match_idx = None
+        best_match_score = 0
+
+        for idx, header in enumerate(headers):
+            header_str = str(header).strip()
+            header_lower = header_str.lower()
+
+            # 策略1: 精确匹配（忽略大小写）
+            if header_lower == field_lower:
+                return idx
+
+            # 策略2: 子字符串匹配
+            if field_lower in header_lower or header_lower in field_lower:
+                # 计算匹配分数（较长匹配更优先）
+                score = max(len(field_lower), len(header_lower)) / min(len(field_lower) + 1, len(header_lower) + 1)
+                if score > best_match_score:
+                    best_match_score = score
+                    best_match_idx = idx
+                continue
+
+            # 策略3: 关键词重叠匹配（适用于中文）
+            header_keywords = set(header_lower.replace(" ", "").split())
+            overlap = field_keywords & header_keywords
+            if overlap and len(overlap) > 0:
+                score = len(overlap) / max(len(field_keywords), len(header_keywords), 1)
+                if score > best_match_score:
+                    best_match_score = score
+                    best_match_idx = idx
+
+        # 只有当匹配分数超过阈值时才返回
+        if best_match_score >= 0.3:
+            logger.info(f"模糊匹配: {field_name} -> {headers[best_match_idx]} (分数: {best_match_score:.2f})")
+            return best_match_idx
+
+        return None
+
     def _extract_column_values(self, rows: List, columns: List, field_name: str) -> List[str]:
         """
         从 rows 和 columns 中提取指定列的值
@@ -819,29 +1025,69 @@ class TemplateFillService:
         if not rows or not columns:
             return []
 
-        # 查找匹配的列（模糊匹配）
-        target_col = None
-        for col in columns:
-            col_str = str(col)
-            if field_name.lower() in col_str.lower() or col_str.lower() in field_name.lower():
-                target_col = col
-                break
+        # 使用增强的匹配算法查找最佳匹配的列索引
+        target_idx = self._find_best_matching_column(columns, field_name)
 
-        if not target_col:
+        if target_idx is None:
             logger.warning(f"未找到匹配列: {field_name}, 可用列: {columns}")
             return []
+
+        target_col = columns[target_idx]
+        logger.info(f"列匹配成功: {field_name} -> {target_col} (索引: {target_idx})")
 
         values = []
         for row in rows:
             if isinstance(row, dict):
                 val = row.get(target_col, "")
-            elif isinstance(row, list) and target_col in columns:
-                val = row[columns.index(target_col)]
+            elif isinstance(row, list) and target_idx < len(row):
+                val = row[target_idx]
             else:
                 val = ""
-            values.append(str(val) if val is not None else "")
+            values.append(self._format_value(val))
 
         return values
+
+    def _format_value(self, val: Any) -> str:
+        """
+        格式化值为字符串，保持原始格式
+
+        - 如果是浮点数但实际上等于整数，返回整数格式（如 3.0 -> "3"）
+        - 如果是浮点数且有小数部分，保留小数（如 3.5 -> "3.5"）
+        - 如果是整数，直接返回（如 3 -> "3"）
+        - 其他类型直接转为字符串
+
+        Args:
+            val: 原始值
+
+        Returns:
+            格式化后的字符串
+        """
+        if val is None:
+            return ""
+
+        # 如果已经是字符串
+        if isinstance(val, str):
+            return val.strip()
+
+        # 如果是布尔值
+        if isinstance(val, bool):
+            return "true" if val else "false"
+
+        # 如果是数字
+        if isinstance(val, (int, float)):
+            # 检查是否是浮点数但等于整数
+            if isinstance(val, float):
+                # 检查是否是小数部分为0
+                if val == int(val):
+                    return str(int(val))
+                else:
+                    # 去除尾部多余的0，但保留必要的小数位
+                    formatted = f"{val:.10f}".rstrip('0').rstrip('.')
+                    return formatted
+            else:
+                return str(val)
+
+        return str(val)
 
     def _extract_values_from_json(self, result) -> List[str]:
         """
@@ -856,12 +1102,12 @@ class TemplateFillService:
         if isinstance(result, dict):
             # 优先找 values 数组
             if "values" in result and isinstance(result["values"], list):
-                vals = [str(v).strip() for v in result["values"] if v and str(v).strip()]
+                vals = [self._format_value(v).strip() for v in result["values"] if self._format_value(v).strip()]
                 if vals:
                     return vals
             # 尝试找 value 字段
             if "value" in result:
-                val = str(result["value"]).strip()
+                val = self._format_value(result["value"]).strip()
                 if val:
                     return [val]
             # 尝试找任何数组类型的键
@@ -869,13 +1115,13 @@ class TemplateFillService:
                 val = result[key]
                 if isinstance(val, list) and len(val) > 0:
                     if all(isinstance(v, (str, int, float, bool)) or v is None for v in val):
-                        vals = [str(v).strip() for v in val if v is not None and str(v).strip()]
+                        vals = [self._format_value(v).strip() for v in val if v is not None and self._format_value(v).strip()]
                         if vals:
                             return vals
                 elif isinstance(val, (str, int, float, bool)):
-                    return [str(val).strip()]
+                    return [self._format_value(val).strip()]
         elif isinstance(result, list):
-            vals = [str(v).strip() for v in result if v is not None and str(v).strip()]
+            vals = [self._format_value(v).strip() for v in result if v is not None and self._format_value(v).strip()]
             if vals:
                 return vals
         return []
@@ -1012,15 +1258,15 @@ class TemplateFillService:
             if isinstance(parsed, dict):
                 # 如果是 {"values": [...]} 格式，提取 values
                 if "values" in parsed and isinstance(parsed["values"], list):
-                    return [str(v).strip() for v in parsed["values"] if v and str(v).strip()]
+                    return [self._format_value(v).strip() for v in parsed["values"] if self._format_value(v).strip()]
                 # 如果是其他 dict 格式，尝试找 values 键
                 for key in ["values", "value", "data", "result"]:
                     if key in parsed and isinstance(parsed[key], list):
-                        return [str(v).strip() for v in parsed[key] if v and str(v).strip()]
+                        return [self._format_value(v).strip() for v in parsed[key] if self._format_value(v).strip()]
                     elif key in parsed:
-                        return [str(parsed[key]).strip()]
+                        return [self._format_value(parsed[key]).strip()]
             elif isinstance(parsed, list):
-                return [str(v).strip() for v in parsed if v and str(v).strip()]
+                return [self._format_value(v).strip() for v in parsed if self._format_value(v).strip()]
         except (json.JSONDecodeError, TypeError):
             pass
 
@@ -1036,14 +1282,14 @@ class TemplateFillService:
                         result = []
                         for item in arr:
                             if isinstance(item, dict) and "values" in item and isinstance(item["values"], list):
-                                result.extend([str(v).strip() for v in item["values"] if v and str(v).strip()])
+                                result.extend([self._format_value(v).strip() for v in item["values"] if self._format_value(v).strip()])
                             elif isinstance(item, dict):
                                 result.append(str(item))
                             else:
-                                result.append(str(item))
+                                result.append(self._format_value(item))
                         if result:
                             return result
-                    return [str(v).strip() for v in arr if v and str(v).strip()]
+                    return [self._format_value(v).strip() for v in arr if self._format_value(v).strip()]
             except:
                 pass
 
@@ -1134,27 +1380,37 @@ class TemplateFillService:
                     hint_text = f"{user_hint}。{hint_text}"
 
                 # 构建针对字段提取的提示词
-                prompt = f"""你是一个专业的数据提取专家。请从以下文档内容中提取与"{field.name}"相关的所有数据。
+                prompt = f"""你是一个专业的数据提取专家。请从以下文档内容中提取与"{field.name}"完全匹配的数据。
 
-字段提示: {hint_text}
+【重要】字段名: "{field.name}"
+【重要】字段提示: {hint_text}
+
+请严格按照以下步骤操作：
+1. 在文档中搜索与"{field.name}"完全相同或高度相关的关键词
+2. 找到后，提取该关键词后的数值（注意：只要数值，不要单位）
+3. 如果是表格中的数据，直接提取该单元格的数值
+4. 如果是段落描述，在关键词附近找数值
+
+【重要】返回值规则：
+- 只返回纯数值，不要单位（如 "4.9" 而不是 "4.9万亿元"）
+- 如果原文是"4.9万亿元"，返回 "4.9"
+- 如果原文是"144000万册"，返回 "144000"
+- 如果是百分比如"增长7.7%"，返回 "7.7"
+- 如果没有找到完全匹配的数据，返回空数组
 
 文档内容：
-{doc.content[:8000] if doc.content else ""}
-
-请完成以下任务：
-1. 仔细阅读文档，找出所有与"{field.name}"相关的数据
-2. 如果文档中有表格数据，提取表格中的对应列值
-3. 如果文档中是段落描述，提取其中的关键数值或结论
-4. 返回提取的所有值（可能多个，用数组存储）
+{doc.content[:10000] if doc.content else ""}
 
 请用严格的 JSON 格式返回：
 {{
-    "values": ["值1", "值2", ...],
+    "values": ["值1", "值2", ...],  // 只填数值，不要单位
     "source": "数据来源说明",
     "confidence": 0.0到1.0之间的置信度
 }}
 
-如果没有找到相关数据，返回空数组 values: []"""
+示例：
+- 如果字段是"图书馆总藏量（万册）"且文档说"图书总藏量14.4亿册"，返回 values: ["144000"]
+- 如果字段是"国内旅游收入（亿元）"且文档说"国内旅游收入4.9万亿元"，返回 values: ["49000"]"""
 
                 messages = [
                     {"role": "system", "content": "你是一个专业的数据提取助手，擅长从政府统计公报等文档中提取数据。请严格按JSON格式输出。"},
@@ -1164,7 +1420,7 @@ class TemplateFillService:
                 response = await self.llm.chat(
                     messages=messages,
                     temperature=0.1,
-                    max_tokens=5000
+                    max_tokens=4000
                 )
 
                 content = self.llm.extract_message_content(response)

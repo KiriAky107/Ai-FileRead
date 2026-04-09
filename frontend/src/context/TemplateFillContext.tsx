@@ -21,6 +21,7 @@ interface TemplateFillState {
   templateFields: TemplateField[];
   sourceFiles: SourceFile[];
   sourceFilePaths: string[];
+  sourceDocIds: string[];
   templateId: string;
   filledResult: any;
   setStep: (step: Step) => void;
@@ -30,6 +31,9 @@ interface TemplateFillState {
   addSourceFiles: (files: SourceFile[]) => void;
   removeSourceFile: (index: number) => void;
   setSourceFilePaths: (paths: string[]) => void;
+  setSourceDocIds: (ids: string[]) => void;
+  addSourceDocId: (id: string) => void;
+  removeSourceDocId: (id: string) => void;
   setTemplateId: (id: string) => void;
   setFilledResult: (result: any) => void;
   reset: () => void;
@@ -41,6 +45,7 @@ const initialState = {
   templateFields: [],
   sourceFiles: [],
   sourceFilePaths: [],
+  sourceDocIds: [],
   templateId: '',
   filledResult: null,
   setStep: () => {},
@@ -50,6 +55,9 @@ const initialState = {
   addSourceFiles: () => {},
   removeSourceFile: () => {},
   setSourceFilePaths: () => {},
+  setSourceDocIds: () => {},
+  addSourceDocId: () => {},
+  removeSourceDocId: () => {},
   setTemplateId: () => {},
   setFilledResult: () => {},
   reset: () => {},
@@ -63,6 +71,7 @@ export const TemplateFillProvider: React.FC<{ children: ReactNode }> = ({ childr
   const [templateFields, setTemplateFields] = useState<TemplateField[]>([]);
   const [sourceFiles, setSourceFiles] = useState<SourceFile[]>([]);
   const [sourceFilePaths, setSourceFilePaths] = useState<string[]>([]);
+  const [sourceDocIds, setSourceDocIds] = useState<string[]>([]);
   const [templateId, setTemplateId] = useState<string>('');
   const [filledResult, setFilledResult] = useState<any>(null);
 
@@ -74,12 +83,21 @@ export const TemplateFillProvider: React.FC<{ children: ReactNode }> = ({ childr
     setSourceFiles(prev => prev.filter((_, i) => i !== index));
   };
 
+  const addSourceDocId = (id: string) => {
+    setSourceDocIds(prev => prev.includes(id) ? prev : [...prev, id]);
+  };
+
+  const removeSourceDocId = (id: string) => {
+    setSourceDocIds(prev => prev.filter(docId => docId !== id));
+  };
+
   const reset = () => {
     setStep('upload');
     setTemplateFile(null);
     setTemplateFields([]);
     setSourceFiles([]);
     setSourceFilePaths([]);
+    setSourceDocIds([]);
     setTemplateId('');
     setFilledResult(null);
   };
@@ -92,6 +110,7 @@ export const TemplateFillProvider: React.FC<{ children: ReactNode }> = ({ childr
         templateFields,
         sourceFiles,
         sourceFilePaths,
+        sourceDocIds,
         templateId,
         filledResult,
         setStep,
@@ -101,6 +120,9 @@ export const TemplateFillProvider: React.FC<{ children: ReactNode }> = ({ childr
         addSourceFiles,
         removeSourceFile,
         setSourceFilePaths,
+        setSourceDocIds,
+        addSourceDocId,
+        removeSourceDocId,
         setTemplateId,
         setFilledResult,
         reset,

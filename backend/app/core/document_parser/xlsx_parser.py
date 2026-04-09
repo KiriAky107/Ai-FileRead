@@ -317,24 +317,70 @@ class XlsxParser(BaseParser):
         import zipfile
         from xml.etree import ElementTree as ET
 
+        # 常见的命名空间
+        COMMON_NAMESPACES = [
+            'http://schemas.openxmlformats.org/spreadsheetml/2006/main',
+            'http://schemas.openxmlformats.org/spreadsheetml/2005/main',
+            'http://schemas.openxmlformats.org/spreadsheetml/2004/main',
+            'http://schemas.openxmlformats.org/spreadsheetml/2003/main',
+        ]
+
         try:
             with zipfile.ZipFile(file_path, 'r') as z:
-                if 'xl/workbook.xml' not in z.namelist():
+                # 尝试多种可能的 workbook.xml 路径
+                possible_paths = ['xl/workbook.xml', 'xl\\workbook.xml', 'workbook.xml']
+                content = None
+                for path in possible_paths:
+                    if path in z.namelist():
+                        content = z.read(path)
+                        logger.info(f"找到 workbook.xml at: {path}")
+                        break
+
+                if content is None:
+                    logger.warning(f"未找到 workbook.xml，文件列表: {z.namelist()[:10]}")
                     return []
-                content = z.read('xl/workbook.xml')
+
                 root = ET.fromstring(content)
 
-                # 命名空间
-                ns = {'main': 'http://schemas.openxmlformats.org/spreadsheetml/2006/main'}
-
                 sheet_names = []
-                for sheet in root.findall('.//main:sheet', ns):
-                    name = sheet.get('name')
-                    if name:
-                        sheet_names.append(name)
+
+                # 方法1：尝试带命名空间的查找
+                for ns in COMMON_NAMESPACES:
+                    sheet_elements = root.findall(f'.//{{{ns}}}sheet')
+                    if sheet_elements:
+                        for sheet in sheet_elements:
+                            name = sheet.get('name')
+                            if name:
+                                sheet_names.append(name)
+                        if sheet_names:
+                            logger.info(f"使用命名空间 {ns} 提取工作表: {sheet_names}")
+                            return sheet_names
+
+                # 方法2：不使用命名空间，直接查找所有 sheet 元素
+                if not sheet_names:
+                    for elem in root.iter():
+                        if elem.tag.endswith('sheet') and elem.tag != 'sheets':
+                            name = elem.get('name')
+                            if name:
+                                sheet_names.append(name)
+                            for child in elem:
+                                if child.tag.endswith('sheet') or child.tag == 'sheet':
+                                    name = child.get('name')
+                                    if name and name not in sheet_names:
+                                        sheet_names.append(name)
+
+                # 方法3：直接从 XML 文本中正则匹配 sheet name
+                if not sheet_names:
+                    import re
+                    xml_str = content.decode('utf-8', errors='ignore')
+                    matches = re.findall(r'<sheet\s+[^>]*name=["\']([^"\']+)["\']', xml_str, re.IGNORECASE)
+                    if matches:
+                        sheet_names = matches
+                        logger.info(f"使用正则提取工作表: {sheet_names}")
 
                 logger.info(f"从 XML 提取工作表: {sheet_names}")
                 return sheet_names
+
         except Exception as e:
             logger.error(f"从 XML 提取工作表名称失败: {e}")
             return []
@@ -356,6 +402,32 @@ class XlsxParser(BaseParser):
         import zipfile
         from xml.etree import ElementTree as ET
 
+        # 常见的命名空间
+        COMMON_NAMESPACES = [
+            'http://schemas.openxmlformats.org/spreadsheetml/2006/main',
+            'http://schemas.openxmlformats.org/spreadsheetml/2005/main',
+            'http://schemas.openxmlformats.org/spreadsheetml/2004/main',
+            'http://schemas.openxmlformats.org/spreadsheetml/2003/main',
+        ]
+
+        def find_elements_with_ns(root, tag_name):
+            """灵活查找元素，支持任意命名空间"""
+            results = []
+            # 方法1：用固定命名空间
+            for ns in COMMON_NAMESPACES:
+                try:
+                    elems = root.findall(f'.//{{{ns}}}{tag_name}')
+                    if elems:
+                        results.extend(elems)
+                except:
+                    pass
+            # 方法2：不带命名空间查找
+            if not results:
+                for elem in root.iter():
+                    if elem.tag.endswith('}' + tag_name):
+                        results.append(elem)
+            return results
+
         with zipfile.ZipFile(file_path, 'r') as z:
             # 获取工作表名称
             sheet_names = self._extract_sheet_names_from_xml(file_path)
@@ -366,57 +438,68 @@ class XlsxParser(BaseParser):
             target_sheet = sheet_name if sheet_name and sheet_name in sheet_names else sheet_names[0]
             sheet_index = sheet_names.index(target_sheet) + 1  # sheet1.xml, sheet2.xml, ...
 
-            # 读取 shared strings
+            # 读取 shared strings - 尝试多种路径
             shared_strings = []
-            if 'xl/sharedStrings.xml' in z.namelist():
-                ss_content = z.read('xl/sharedStrings.xml')
-                ss_root = ET.fromstring(ss_content)
-                ns = {'main': 'http://schemas.openxmlformats.org/spreadsheetml/2006/main'}
-                for si in ss_root.findall('.//main:si', ns):
-                    t = si.find('.//main:t', ns)
-                    if t is not None:
-                        shared_strings.append(t.text or '')
-                    else:
-                        shared_strings.append('')
+            ss_paths = ['xl/sharedStrings.xml', 'xl\\sharedStrings.xml', 'sharedStrings.xml']
+            for ss_path in ss_paths:
+                if ss_path in z.namelist():
+                    try:
+                        ss_content = z.read(ss_path)
+                        ss_root = ET.fromstring(ss_content)
+                        for si in find_elements_with_ns(ss_root, 'si'):
+                            t_elements = [c for c in si if c.tag.endswith('}t') or c.tag == 't']
+                            if t_elements:
+                                shared_strings.append(t_elements[0].text or '')
+                            else:
+                                shared_strings.append('')
+                        break
+                    except Exception as e:
+                        logger.warning(f"读取 sharedStrings 失败: {e}")
 
-            # 读取工作表
-            sheet_file = f'xl/worksheets/sheet{sheet_index}.xml'
-            if sheet_file not in z.namelist():
-                raise ValueError(f"工作表文件 {sheet_file} 不存在")
+            # 读取工作表 - 尝试多种可能的路径
+            sheet_content = None
+            sheet_paths = [
+                f'xl/worksheets/sheet{sheet_index}.xml',
+                f'xl\\worksheets\\sheet{sheet_index}.xml',
+                f'worksheets/sheet{sheet_index}.xml',
+            ]
+            for sp in sheet_paths:
+                if sp in z.namelist():
+                    sheet_content = z.read(sp)
+                    break
 
-            sheet_content = z.read(sheet_file)
+            if sheet_content is None:
+                raise ValueError(f"工作表文件 sheet{sheet_index}.xml 不存在")
+
             root = ET.fromstring(sheet_content)
-            ns = {'main': 'http://schemas.openxmlformats.org/spreadsheetml/2006/main'}
 
             # 收集所有行数据
             all_rows = []
             headers = {}
 
-            for row in root.findall('.//main:row', ns):
+            for row in find_elements_with_ns(root, 'row'):
                 row_idx = int(row.get('r', 0))
                 row_cells = {}
-                for cell in row.findall('main:c', ns):
+                for cell in find_elements_with_ns(row, 'c'):
                     cell_ref = cell.get('r', '')
                     col_letters = ''.join(filter(str.isalpha, cell_ref))
                     cell_type = cell.get('t', 'n')
-                    v = cell.find('main:v', ns)
+                    v_elements = find_elements_with_ns(cell, 'v')
+                    v = v_elements[0] if v_elements else None
 
                     if v is not None and v.text:
                         if cell_type == 's':
-                            # shared string
                             try:
                                 row_cells[col_letters] = shared_strings[int(v.text)]
                             except (ValueError, IndexError):
                                 row_cells[col_letters] = v.text
                         elif cell_type == 'b':
-                            # boolean
                             row_cells[col_letters] = v.text == '1'
                         else:
                             row_cells[col_letters] = v.text
                     else:
                         row_cells[col_letters] = None
 
-                # 处理表头行
                 if row_idx == header_row + 1:
                     headers = {**row_cells}
                 elif row_idx > header_row + 1:
@@ -424,7 +507,6 @@ class XlsxParser(BaseParser):
 
             # 构建 DataFrame
             if headers:
-                # 按原始列顺序排列
                 col_order = list(headers.keys())
                 df = pd.DataFrame(all_rows)
                 if not df.empty:
