@@ -674,7 +674,7 @@ const Documents: React.FC = () => {
           <h1 className="text-3xl font-extrabold tracking-tight">文档中心</h1>
           <p className="text-muted-foreground">上传文档，自动解析并使用 AI 进行深度分析</p>
         </div>
-        <Button variant="outline" className="rounded-xl gap-2" onClick={loadDocuments}>
+        <Button variant="outline" className="rounded-xl gap-2" onClick={() => loadDocuments()}>
           <RefreshCcw size={18} />
           <span>刷新</span>
         </Button>
