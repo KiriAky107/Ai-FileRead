@@ -26,7 +26,9 @@ class MongoDB:
         try:
             self.client = AsyncIOMotorClient(
                 settings.MONGODB_URL,
-                serverSelectionTimeoutMS=5000,
+                serverSelectionTimeoutMS=30000,  # 30秒超时，适应远程服务器
+                connectTimeoutMS=30000,  # 连接超时
+                socketTimeoutMS=60000,  # Socket 超时
             )
             self.db = self.client[settings.MONGODB_DB_NAME]
             # 验证连接

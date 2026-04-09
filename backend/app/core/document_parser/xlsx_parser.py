@@ -104,8 +104,15 @@ class XlsxParser(BaseParser):
                 # pandas 读取失败，尝试 XML 方式
                 df = self._read_excel_sheet_xml(file_path, sheet_name=target_sheet, header_row=header_row)
 
-            # 检查 DataFrame 是否为空
-            if df is None or df.empty:
+            # 检查 DataFrame 是否为空（但如果有列名，仍算有效）
+            if df is None:
+                return ParseResult(
+                    success=False,
+                    error=f"工作表 '{target_sheet}' 读取失败"
+                )
+
+            # 如果 DataFrame 为空但有列名（比如模板文件），仍算有效
+            if df.empty and len(df.columns) == 0:
                 return ParseResult(
                     success=False,
                     error=f"工作表 '{target_sheet}' 为空，请检查 Excel 文件内容"
