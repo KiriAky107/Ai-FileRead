@@ -94,6 +94,28 @@ class MongoDB:
         logger.info(f"✓ 文档已存入MongoDB: [{doc_type}] {filename} | ID: {doc_id}")
         return doc_id
 
+    async def update_document(self, doc_id: str, updates: Dict[str, Any]) -> bool:
+        """
+        更新文档
+
+        Args:
+            doc_id: 文档ID
+            updates: 要更新的字段字典
+
+        Returns:
+            是否更新成功
+        """
+        from bson import ObjectId
+        try:
+            result = await self.documents.update_one(
+                {"_id": ObjectId(doc_id)},
+                {"$set": updates}
+            )
+            return result.modified_count > 0
+        except Exception as e:
+            logger.error(f"更新文档失败 {doc_id}: {str(e)}")
+            return False
+
     async def get_document(self, doc_id: str) -> Optional[Dict[str, Any]]:
         """根据ID获取文档"""
         from bson import ObjectId

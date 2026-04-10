@@ -764,6 +764,41 @@ export const backendApi = {
     }
   },
 
+  /**
+   * 填充原始模板并导出
+   *
+   * 直接打开原始模板文件，将数据填入模板的表格/单元格中，然后导出
+   * 适用于比赛场景：保持原始模板格式不变
+   */
+  async fillAndExportTemplate(
+    templatePath: string,
+    filledData: Record<string, any>,
+    format: 'xlsx' | 'docx' = 'xlsx'
+  ): Promise<Blob> {
+    const url = `${BACKEND_BASE_URL}/templates/fill-and-export`;
+
+    try {
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          template_path: templatePath,
+          filled_data: filledData,
+          format,
+        }),
+      });
+
+      if (!response.ok) {
+        const error = await response.json();
+        throw new Error(error.detail || '填充模板失败');
+      }
+      return await response.blob();
+    } catch (error) {
+      console.error('填充模板失败:', error);
+      throw error;
+    }
+  },
+
   // ==================== Excel 专用接口 (保留兼容) ====================
 
   /**
@@ -1256,6 +1291,86 @@ export const aiApi = {
       return await response.json();
     } catch (error) {
       console.error('分析文本失败:', error);
+      throw error;
+    }
+  },
+
+  // ==================== Word AI 解析 ====================
+
+  /**
+   * 使用 AI 解析 Word 文档，提取结构化数据
+   */
+  async analyzeWordWithAI(
+    file: File,
+    userHint: string = ''
+  ): Promise<{
+    success: boolean;
+    type?: string;
+    headers?: string[];
+    rows?: string[][];
+    key_values?: Record<string, string>;
+    list_items?: string[];
+    summary?: string;
+    error?: string;
+  }> {
+    const formData = new FormData();
+    formData.append('file', file);
+    if (userHint) {
+      formData.append('user_hint', userHint);
+    }
+
+    const url = `${BACKEND_BASE_URL}/ai/analyze/word`;
+
+    try {
+      const response = await fetch(url, {
+        method: 'POST',
+        body: formData,
+      });
+
+      if (!response.ok) {
+        const error = await response.json();
+        throw new Error(error.detail || 'Word AI 解析失败');
+      }
+
+      return await response.json();
+    } catch (error) {
+      console.error('Word AI 解析失败:', error);
+      throw error;
+    }
+  },
+
+  /**
+   * 使用 AI 解析 Word 文档并填写模板
+   * 一次性完成：AI解析 + 填表
+   */
+  async fillTemplateFromWordAI(
+    file: File,
+    templateFields: TemplateField[],
+    userHint: string = ''
+  ): Promise<FillResult> {
+    const formData = new FormData();
+    formData.append('file', file);
+    formData.append('template_fields', JSON.stringify(templateFields));
+    if (userHint) {
+      formData.append('user_hint', userHint);
+    }
+
+    const url = `${BACKEND_BASE_URL}/ai/analyze/word/fill-template`;
+
+    try {
+      const response = await fetch(url, {
+        method: 'POST',
+        body: formData,
+      });
+
+      if (!response.ok) {
+        const error = await response.json();
+        throw new Error(error.detail || 'Word AI 填表失败');
+      }
+
+      return await response.json();
+    } catch (error) {
+      console.error('Word AI 填表失败:', error);
       throw error;
     }
   },

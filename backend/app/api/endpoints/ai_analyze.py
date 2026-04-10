@@ -10,6 +10,7 @@ import os
 
 from app.services.excel_ai_service import excel_ai_service
 from app.services.markdown_ai_service import markdown_ai_service
+from app.services.word_ai_service import word_ai_service
 
 logger = logging.getLogger(__name__)
 
@@ -329,3 +330,130 @@ async def get_markdown_outline(
     except Exception as e:
         logger.error(f"获取 Markdown 大纲失败: {str(e)}")
         raise HTTPException(status_code=500, detail=f"获取大纲失败: {str(e)}")
+
+
+# ==================== Word 文档 AI 解析 ====================
+
+@router.post("/analyze/word")
+async def analyze_word(
+    file: UploadFile = File(...),
+    user_hint: str = Query("", description="用户提示词，如'请提取表格数据'")
+):
+    """
+    使用 AI 解析 Word 文档，提取结构化数据
+
+    适用于从非结构化的 Word 文档中提取表格数据、键值对等信息
+
+    Args:
+        file: 上传的 Word 文件
+        user_hint: 用户提示词
+
+    Returns:
+        dict: 包含结构化数据的解析结果
+    """
+    if not file.filename:
+        raise HTTPException(status_code=400, detail="文件名为空")
+
+    file_ext = file.filename.split('.')[-1].lower()
+    if file_ext not in ['docx']:
+        raise HTTPException(
+            status_code=400,
+            detail=f"不支持的文件类型: {file_ext}，仅支持 .docx"
+        )
+
+    try:
+        content = await file.read()
+
+        # 保存到临时文件
+        with tempfile.NamedTemporaryFile(mode='wb', suffix='.docx', delete=False) as tmp:
+            tmp.write(content)
+            tmp_path = tmp.name
+
+        try:
+            logger.info(f"开始 AI 解析 Word 文件: {file.filename}")
+
+            result = await word_ai_service.parse_word_with_ai(
+                file_path=tmp_path,
+                user_hint=user_hint
+            )
+
+            logger.info(f"Word AI 解析完成: {file.filename}, success={result.get('success')}")
+
+            return result
+
+        finally:
+            if os.path.exists(tmp_path):
+                os.unlink(tmp_path)
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Word AI 解析出错: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"AI 解析失败: {str(e)}")
+
+
+@router.post("/analyze/word/fill-template")
+async def fill_template_with_word_ai(
+    file: UploadFile = File(...),
+    template_fields: str = Query("", description="模板字段，JSON字符串"),
+    user_hint: str = Query("", description="用户提示词")
+):
+    """
+    使用 AI 解析 Word 文档并填写模板
+
+    前端调用此接口即可完成：AI解析 + 填表
+
+    Args:
+        file: 上传的 Word 文件
+        template_fields: 模板字段 JSON 字符串
+        user_hint: 用户提示词
+
+    Returns:
+        dict: 填写结果
+    """
+    if not file.filename:
+        raise HTTPException(status_code=400, detail="文件名为空")
+
+    file_ext = file.filename.split('.')[-1].lower()
+    if file_ext not in ['docx']:
+        raise HTTPException(
+            status_code=400,
+            detail=f"不支持的文件类型: {file_ext}，仅支持 .docx"
+        )
+
+    try:
+        import json as json_module
+        fields = json_module.loads(template_fields) if template_fields else []
+    except json_module.JSONDecodeError:
+        raise HTTPException(status_code=400, detail="template_fields 格式错误，应为 JSON 数组")
+
+    try:
+        content = await file.read()
+
+        # 保存到临时文件
+        with tempfile.NamedTemporaryFile(mode='wb', suffix='.docx', delete=False) as tmp:
+            tmp.write(content)
+            tmp_path = tmp.name
+
+        try:
+            logger.info(f"开始 AI 填表（Word）: {file.filename}, 字段数: {len(fields)}")
+
+            result = await word_ai_service.fill_template_with_ai(
+                file_path=tmp_path,
+                template_fields=fields,
+                user_hint=user_hint
+            )
+
+            logger.info(f"Word AI 填表完成: {file.filename}, success={result.get('success')}")
+
+            return result
+
+        finally:
+            if os.path.exists(tmp_path):
+                os.unlink(tmp_path)
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Word AI 填表出错: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"AI 填表失败: {str(e)}")
