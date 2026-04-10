@@ -10,6 +10,7 @@ import os
 
 from app.services.excel_ai_service import excel_ai_service
 from app.services.markdown_ai_service import markdown_ai_service
+from app.services.template_fill_service import template_fill_service
 
 logger = logging.getLogger(__name__)
 
@@ -329,3 +330,74 @@ async def get_markdown_outline(
     except Exception as e:
         logger.error(f"获取 Markdown 大纲失败: {str(e)}")
         raise HTTPException(status_code=500, detail=f"获取大纲失败: {str(e)}")
+
+
+@router.post("/analyze/txt")
+async def analyze_txt(
+    file: UploadFile = File(...),
+):
+    """
+    上传并使用 AI 分析 TXT 文本文件，提取结构化数据
+
+    将非结构化文本转换为结构化表格数据，便于后续填表使用
+
+    Args:
+        file: 上传的 TXT 文件
+
+    Returns:
+        dict: 分析结果，包含结构化表格数据
+    """
+    if not file.filename:
+        raise HTTPException(status_code=400, detail="文件名为空")
+
+    file_ext = file.filename.split('.')[-1].lower()
+    if file_ext not in ['txt', 'text']:
+        raise HTTPException(
+            status_code=400,
+            detail=f"不支持的文件类型: {file_ext}，仅支持 .txt"
+        )
+
+    try:
+        # 读取文件内容
+        content = await file.read()
+
+        # 保存到临时文件
+        with tempfile.NamedTemporaryFile(mode='wb', suffix='.txt', delete=False) as tmp:
+            tmp.write(content)
+            tmp_path = tmp.name
+
+        try:
+            logger.info(f"开始 AI 分析 TXT 文件: {file.filename}")
+
+            # 使用 template_fill_service 的 AI 分析方法
+            result = await template_fill_service.analyze_txt_with_ai(
+                content=content.decode('utf-8', errors='replace'),
+                filename=file.filename
+            )
+
+            if result:
+                logger.info(f"TXT AI 分析成功: {file.filename}")
+                return {
+                    "success": True,
+                    "filename": file.filename,
+                    "structured_data": result
+                }
+            else:
+                logger.warning(f"TXT AI 分析返回空结果: {file.filename}")
+                return {
+                    "success": False,
+                    "filename": file.filename,
+                    "error": "AI 分析未能提取到结构化数据",
+                    "structured_data": None
+                }
+
+        finally:
+            # 清理临时文件
+            if os.path.exists(tmp_path):
+                os.unlink(tmp_path)
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"TXT AI 分析过程中出错: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"分析失败: {str(e)}")

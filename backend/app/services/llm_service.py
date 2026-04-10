@@ -55,12 +55,20 @@ class LLMService:
         payload.update(kwargs)
 
         try:
+            logger.info(f"LLM API 请求: model={self.model_name}, temperature={temperature}, max_tokens={max_tokens}")
+            logger.info(f"消息数量: {len(messages)}")
+            for i, msg in enumerate(messages):
+                logger.info(f"消息[{i}]: role={msg.get('role')}, content长度={len(msg.get('content', ''))}")
+
             async with httpx.AsyncClient(timeout=60.0) as client:
                 response = await client.post(
                     f"{self.base_url}/chat/completions",
                     headers=headers,
                     json=payload
                 )
+                logger.info(f"LLM API 响应状态: {response.status_code}")
+                if response.status_code != 200:
+                    logger.error(f"LLM API 响应内容: {response.text}")
                 response.raise_for_status()
                 return response.json()
 

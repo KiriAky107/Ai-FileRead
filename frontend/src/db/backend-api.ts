@@ -1162,6 +1162,48 @@ export const aiApi = {
   },
 
   /**
+   * 上传并使用 AI 分析 TXT 文本文件，提取结构化数据
+   */
+  async analyzeTxt(
+    file: File
+  ): Promise<{
+    success: boolean;
+    filename?: string;
+    structured_data?: {
+      table?: {
+        columns?: string[];
+        rows?: string[][];
+      };
+      summary?: string;
+      key_value_pairs?: Array<{ key: string; value: string }>;
+      numeric_data?: Array<{ name: string; value: number; unit?: string }>;
+    };
+    error?: string;
+  }> {
+    const formData = new FormData();
+    formData.append('file', file);
+
+    const url = `${BACKEND_BASE_URL}/ai/analyze/txt`;
+
+    try {
+      const response = await fetch(url, {
+        method: 'POST',
+        body: formData,
+      });
+
+      if (!response.ok) {
+        const error = await response.json();
+        throw new Error(error.detail || 'TXT AI 分析失败');
+      }
+
+      return await response.json();
+    } catch (error) {
+      console.error('TXT AI 分析失败:', error);
+      throw error;
+    }
+  },
+
+  /**
    * 生成统计信息和图表
    */
   async generateStatistics(

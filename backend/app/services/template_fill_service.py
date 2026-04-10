@@ -5,6 +5,7 @@
 """
 import logging
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from app.core.database import mongodb
@@ -32,6 +33,7 @@ class SourceDocument:
     doc_type: str
     content: str = ""
     structured_data: Dict[str, Any] = field(default_factory=dict)
+    ai_structured_data: Optional[Dict[str, Any]] = None  # AI 结构化分析结果缓存
 
 
 @dataclass
@@ -76,12 +78,14 @@ class TemplateFillService:
         filled_data = {}
         fill_details = []
 
-        logger.info(f"开始填表: {len(template_fields)} 个字段, {len(source_doc_ids or [])} 个源文档")
+        logger.info(f"开始填表: {len(template_fields)} 个字段, {len(source_doc_ids or [])} 个源文档, {len(source_file_paths or [])} 个文件路径")
 
         # 1. 加载源文档内容
         source_docs = await self._load_source_documents(source_doc_ids, source_file_paths)
 
         logger.info(f"加载了 {len(source_docs)} 个源文档")
+        for doc in source_docs:
+            logger.info(f"  - 文档: {doc.filename}, 类型: {doc.doc_type}, 内容长度: {len(doc.content)}, AI分析: {bool(doc.ai_structured_data)}")
 
         if not source_docs:
             logger.warning("没有找到源文档，填表结果将全部为空")
@@ -140,7 +144,7 @@ class TemplateFillService:
         source_file_paths: Optional[List[str]] = None
     ) -> List[SourceDocument]:
         """
-        加载源文档内容
+        加载源文档内容，并对 TXT 文件进行 AI 结构化分析
 
         Args:
             source_doc_ids: MongoDB 文档 ID 列表
@@ -157,12 +161,23 @@ class TemplateFillService:
                 try:
                     doc = await mongodb.get_document(doc_id)
                     if doc:
+                        doc_type = doc.get("doc_type", "unknown")
+                        content = doc.get("content", "")
+
+                        # 对 TXT 文档进行 AI 结构化分析
+                        ai_structured = None
+                        if doc_type == "txt" and content:
+                            logger.info(f"MongoDB TXT 文档需要 AI 分析: {doc_id}, 内容长度: {len(content)}")
+                            ai_structured = await self._analyze_txt_once(content, doc.get("metadata", {}).get("original_filename", "unknown"))
+                            logger.info(f"AI 分析结果: has_data={ai_structured is not None}")
+
                         source_docs.append(SourceDocument(
                             doc_id=doc_id,
                             filename=doc.get("metadata", {}).get("original_filename", "unknown"),
-                            doc_type=doc.get("doc_type", "unknown"),
-                            content=doc.get("content", ""),
-                            structured_data=doc.get("structured_data", {})
+                            doc_type=doc_type,
+                            content=content,
+                            structured_data=doc.get("structured_data", {}),
+                            ai_structured_data=ai_structured
                         ))
                         logger.info(f"从MongoDB加载文档: {doc_id}")
                 except Exception as e:
@@ -170,10 +185,13 @@ class TemplateFillService:
 
         # 2. 从文件路径加载文档
         if source_file_paths:
+            logger.info(f"开始从文件路径加载 {len(source_file_paths)} 个文档")
             for file_path in source_file_paths:
                 try:
+                    logger.info(f"  加载文件: {file_path}")
                     parser = ParserFactory.get_parser(file_path)
                     result = parser.parse(file_path)
+                    logger.info(f"  解析结果: success={result.success}, error={result.error}")
                     if result.success:
                         # result.data 的结构取决于解析器类型:
                         # - Excel 单 sheet: {columns: [...], rows: [...], row_count, column_count}
@@ -182,19 +200,148 @@ class TemplateFillService:
                         doc_data = result.data if result.data else {}
                         doc_content = doc_data.get("content", "") if isinstance(doc_data, dict) else ""
                         doc_structured = doc_data if isinstance(doc_data, dict) and "rows" in doc_data or isinstance(doc_data, dict) and "sheets" in doc_data else {}
+                        doc_type = result.metadata.get("extension", "unknown").replace(".", "").lower()
+                        logger.info(f"  文件类型: {doc_type}, 内容长度: {len(doc_content)}")
+
+                        # 对 TXT 文件进行 AI 结构化分析
+                        ai_structured = None
+                        if doc_type == "txt" and doc_content:
+                            logger.info(f"  检测到 TXT 文件，内容前100字: {doc_content[:100]}")
+                            ai_structured = await self._analyze_txt_once(doc_content, result.metadata.get("filename", Path(file_path).name))
+                            logger.info(f"  AI 分析完成: has_result={ai_structured is not None}")
+                            if ai_structured:
+                                logger.info(f"  AI 结果 keys: {list(ai_structured.keys())}")
+                                if "table" in ai_structured:
+                                    table = ai_structured.get("table", {})
+                                    logger.info(f"  AI 表格: {len(table.get('columns', []))} 列, {len(table.get('rows', []))} 行")
 
                         source_docs.append(SourceDocument(
                             doc_id=file_path,
-                            filename=result.metadata.get("filename", file_path.split("/")[-1]),
-                            doc_type=result.metadata.get("extension", "unknown").replace(".", ""),
+                            filename=result.metadata.get("filename", Path(file_path).name),
+                            doc_type=doc_type,
                             content=doc_content,
-                            structured_data=doc_structured
+                            structured_data=doc_structured,
+                            ai_structured_data=ai_structured
                         ))
-                        logger.info(f"从文件加载文档: {file_path}, content长度: {len(doc_content)}, structured数据: {bool(doc_structured)}")
+                    else:
+                        logger.warning(f"文档解析失败 {file_path}: {result.error}")
                 except Exception as e:
-                    logger.error(f"从文件加载文档失败 {file_path}: {str(e)}")
+                    logger.error(f"从文件加载文档失败 {file_path}: {str(e)}", exc_info=True)
 
         return source_docs
+
+    async def _analyze_txt_once(self, content: str, filename: str) -> Optional[Dict[str, Any]]:
+        """
+        对 TXT 内容进行一次性 AI 分析，提取保持行结构的表格数据
+
+        Args:
+            content: 原始文本内容
+            filename: 文件名
+
+        Returns:
+            分析结果字典，包含表格数据
+        """
+        # 确保 content 是字符串
+        if isinstance(content, bytes):
+            try:
+                content = content.decode('utf-8')
+            except:
+                content = content.decode('gbk', errors='replace')
+
+        if not content or len(str(content).strip()) < 10:
+            logger.warning(f"TXT 内容过短或为空: {filename}, 类型: {type(content)}")
+            return None
+
+        content = str(content)
+
+        # 限制内容长度，避免 token 超限
+        max_chars = 8000
+        truncated_content = content[:max_chars] if len(content) > max_chars else content
+
+        prompt = f"""你是一个专业的数据提取助手。请从以下文本内容中提取表格数据。
+
+文件名：{filename}
+
+文本内容：
+{truncated_content}
+
+请仔细分析文本中的表格数据，提取所有行。每行是一个完整的数据记录。
+
+请严格按以下 JSON 格式输出，不要添加任何解释：
+{{
+    "table": {{
+        "columns": ["列1", "列2", "列3", ...],
+        "rows": [
+            ["值1", "值2", "值3", ...],
+            ["值1", "值2", "值3", ...]
+        ]
+    }},
+    "summary": "简要说明数据内容"
+}}"""
+
+        messages = [
+            {"role": "system", "content": "你是一个专业的数据提取助手。请严格按JSON格式输出，只输出纯JSON。"},
+            {"role": "user", "content": prompt}
+        ]
+
+        try:
+            logger.info(f"开始 AI 分析 TXT 文件: {filename}, 内容长度: {len(truncated_content)}")
+            response = await self.llm.chat(
+                messages=messages,
+                temperature=0.1,
+                max_tokens=2000
+            )
+
+            ai_content = self.llm.extract_message_content(response)
+            logger.info(f"LLM 返回内容长度: {len(ai_content)}, 内容前200字: {ai_content[:200]}")
+
+            # 解析 JSON
+            import json
+            import re
+
+            cleaned = ai_content.strip()
+            cleaned = re.sub(r'^```json\s*', '', cleaned, flags=re.MULTILINE)
+            cleaned = re.sub(r'^```\s*', '', cleaned, flags=re.MULTILINE)
+            cleaned = cleaned.strip()
+
+            logger.info(f"清理后内容前200字: {cleaned[:200]}")
+
+            # 查找 JSON
+            json_start = cleaned.find('{')
+            json_end = cleaned.rfind('}') + 1
+
+            if json_start >= 0 and json_end > json_start:
+                json_str = cleaned[json_start:json_end]
+                logger.info(f"提取的JSON字符串: {json_str[:200]}")
+                try:
+                    result = json.loads(json_str)
+                    # 兼容不同格式的返回
+                    if "table" in result:
+                        table = result["table"]
+                    elif "data" in result:
+                        table = result["data"]
+                    elif "rows" in result:
+                        table = {"columns": result.get("columns", []), "rows": result.get("rows", [])}
+                    else:
+                        # 尝试直接使用根级别的数据
+                        table = result
+
+                    if isinstance(table, dict) and ("columns" in table or "rows" in table):
+                        columns = table.get("columns", [])
+                        rows = table.get("rows", [])
+                        logger.info(f"TXT AI 分析成功: {filename}, 列数: {len(columns)}, 行数: {len(rows)}")
+                        return {"table": {"columns": columns, "rows": rows}, "summary": result.get("summary", "")}
+                    else:
+                        logger.warning(f"JSON 中没有找到有效的表格数据: {filename}, result keys: {list(result.keys())}")
+                except json.JSONDecodeError as e:
+                    logger.warning(f"JSON 解析失败: {e}, json_str: {json_str[:200]}")
+
+            logger.warning(f"无法解析 AI 返回的 JSON: {filename}, ai_content: {ai_content[:500]}")
+            return None
+
+        except Exception as e:
+            logger.error(f"AI 分析 TXT 失败: {str(e)}, 文件: {filename}", exc_info=True)
+            return None
 
     async def _extract_field_value(
         self,
@@ -237,27 +384,25 @@ class TemplateFillService:
         logger.info(f"字段 {field.name} 无法直接从结构化数据提取，使用 LLM...")
 
         # 构建上下文文本 - 传入字段名，只提取该列数据
-        context_text = self._build_context_text(source_docs, field_name=field.name, max_length=200000)
+        context_text = await self._build_context_text(source_docs, field_name=field.name, max_length=6000)
 
         # 构建提示词
         hint_text = field.hint if field.hint else f"请提取{field.name}的信息"
         if user_hint:
             hint_text = f"{user_hint}。{hint_text}"
 
-        prompt = f"""你是一个专业的数据提取专家。请从以下文档内容中提取"{field.name}"字段的所有行数据。
+        prompt = f"""你是一个专业的数据提取专家。请从以下文档内容中提取"{field.name}"字段的值。
 
-参考文档内容（已提取" {field.name}"列的数据）：
+参考文档内容：
 {context_text}
 
-请提取上述所有行的" {field.name}"值，存入数组。每一行对应数组中的一个元素。
-如果某行该字段为空，请用空字符串""占位。
+请仔细阅读上述内容，找到所有与"{field.name}"相关的值。
+如果内容是表格格式，请找到对应的列，提取该列所有行的值。
+每一行对应数组中的一个元素，保持行与行的对应关系。
+如果找不到对应的值，返回空数组。
 
-请严格按照以下 JSON 格式输出，不要添加任何解释：
-{{
-    "values": ["第1行的值", "第2行的值", "第3行的值", ...],
-    "source": "数据来源的文档描述",
-    "confidence": 0.0到1.0之间的置信度
-}}
+请严格按以下JSON格式输出（只输出纯JSON，不要任何解释）：
+{{"values": ["值1", "值2", "值3", ...], "source": "来源说明", "confidence": 0.9}}
 """
 
         # 调用 LLM
@@ -270,7 +415,7 @@ class TemplateFillService:
             response = await self.llm.chat(
                 messages=messages,
                 temperature=0.1,
-                max_tokens=50000
+                max_tokens=2000
             )
 
             content = self.llm.extract_message_content(response)
@@ -280,7 +425,6 @@ class TemplateFillService:
             import re
 
             extracted_values = []
-            extracted_value = ""
             extracted_source = "LLM生成"
             confidence = 0.5
 
@@ -368,7 +512,7 @@ class TemplateFillService:
                 confidence=0.0
             )
 
-    def _build_context_text(self, source_docs: List[SourceDocument], field_name: str = None, max_length: int = 8000) -> str:
+    async def _build_context_text(self, source_docs: List[SourceDocument], field_name: str = None, max_length: int = 8000) -> str:
         """
         构建上下文文本
 
@@ -474,7 +618,54 @@ class TemplateFillService:
                                 doc_content += " | ".join(str(cell) for cell in row) + "\n"
                             row_count += 1
             elif doc.content:
-                doc_content = doc.content[:5000]
+                # TXT 文件优先使用 AI 分析后的结构化数据
+                if doc.doc_type == "txt" and doc.ai_structured_data:
+                    # 使用 AI 结构化分析结果
+                    ai_table = doc.ai_structured_data.get("table", {})
+                    columns = ai_table.get("columns", [])
+                    rows = ai_table.get("rows", [])
+
+                    logger.info(f"TXT AI 结构化数据: doc_type={doc.doc_type}, has_ai_data={doc.ai_structured_data is not None}, columns={columns}, rows={len(rows) if rows else 0}")
+
+                    if columns and rows:
+                        doc_content += f"\n【文档: {doc.filename} - AI 结构化表格，共 {len(rows)} 行】\n"
+                        if field_name:
+                            # 查找匹配的列
+                            target_col = None
+                            for col in columns:
+                                if field_name.lower() in str(col).lower() or str(col).lower() in field_name.lower():
+                                    target_col = col
+                                    break
+                            if target_col:
+                                doc_content += f"列名: {target_col}\n"
+                                for row_idx, row in enumerate(rows):
+                                    if isinstance(row, list) and target_col in columns:
+                                        val = row[columns.index(target_col)]
+                                    else:
+                                        val = str(row.get(target_col, "")) if isinstance(row, dict) else ""
+                                    doc_content += f"行{row_idx+1}: {val}\n"
+                                    row_count += 1
+                        else:
+                            # 输出表格
+                            doc_content += " | ".join(str(col) for col in columns) + "\n"
+                            for row in rows:
+                                if isinstance(row, list):
+                                    doc_content += " | ".join(str(cell) for cell in row) + "\n"
+                                else:
+                                    doc_content += " | ".join(str(row.get(col, "")) for col in columns) + "\n"
+                                row_count += 1
+                        logger.info(f"使用 TXT AI 结构化表格: {doc.filename}, {len(columns)} 列, {len(rows)} 行")
+                    else:
+                        # AI 结果无表格，回退到原始内容
+                        doc_content = doc.content[:8000]
+                        logger.warning(f"TXT AI 结果无表格: {doc.filename}, 使用原始内容")
+                elif doc.doc_type == "txt" and doc.content:
+                    # 没有 AI 分析结果，直接使用原始内容
+                    doc_content = doc.content[:8000]
+                    logger.info(f"使用 TXT 原始内容: {doc.filename}, 长度: {len(doc_content)}")
+                else:
+                    # 其他文档类型直接使用内容
+                    doc_content = doc.content[:5000]
 
             if doc_content:
                 doc_context = f"【文档: {doc.filename} ({doc.doc_type})】\n{doc_content}"
@@ -493,6 +684,182 @@ class TemplateFillService:
         result = "\n\n".join(contexts) if contexts else "（源文档内容为空）"
         logger.info(f"最终上下文长度: {len(result)}")
         return result
+
+    async def analyze_txt_with_ai(self, content: str, filename: str = "") -> Dict[str, Any]:
+        """
+        使用 AI 分析 TXT 文本内容，提取结构化数据
+
+        Args:
+            content: 原始文本内容
+            filename: 文件名（用于日志）
+
+        Returns:
+            结构化数据，包含:
+            - key_value_pairs: 键值对列表
+            - tables: 表格数据列表
+            - numeric_data: 数值数据列表
+            - text_summary: 文本摘要
+        """
+        if not content or len(content.strip()) < 10:
+            logger.warning(f"TXT 内容过短或为空，跳过 AI 分析: {filename}")
+            return {}
+
+        # 截断过长的文本，避免 token 超限
+        max_chars = 15000
+        truncated_content = content[:max_chars] if len(content) > max_chars else content
+
+        system_prompt = """你是一个专业的数据提取专家。请分析提供的文本内容，提取其中包含的结构化信息。
+
+请提取以下类型的数据：
+
+1. **键值对信息**：从文本中提取的名词-值对，如"姓名: 张三"、"年龄: 25"等
+2. **表格数据**：如果文本中包含表格或列表形式的数据，提取出来
+3. **数值数据**：包含数值、金额、百分比、统计数字等
+4. **关键描述**：文本的核心内容摘要
+
+请严格按照以下 JSON 格式输出，不要添加任何 Markdown 标记或解释：
+{
+    "key_value_pairs": [
+        {"key": "键名1", "value": "值1"},
+        {"key": "键名2", "value": "值2"}
+    ],
+    "tables": [
+        {
+            "description": "表格描述",
+            "columns": ["列1", "列2"],
+            "rows": [["值1", "值2"], ["值3", "值4"]]
+        }
+    ],
+    "numeric_data": [
+        {"name": "数据项名称", "value": 123.45, "unit": "单位"}
+    ],
+    "text_summary": "一段简洁的文本摘要，不超过200字"
+}"""
+
+        user_message = f"""请分析以下文本内容，提取结构化数据：
+
+文件名：{filename}
+
+文本内容：
+{truncated_content}
+
+请严格按 JSON 格式输出。"""
+
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_message}
+        ]
+
+        try:
+            logger.info(f"开始 AI 分析 TXT 文件: {filename}, 内容长度: {len(truncated_content)}")
+            response = await self.llm.chat(
+                messages=messages,
+                temperature=0.1,
+                max_tokens=2000
+            )
+
+            ai_content = self.llm.extract_message_content(response)
+            logger.info(f"AI 返回内容长度: {len(ai_content)}")
+
+            # 解析 JSON
+            import json
+            import re
+
+            # 清理 markdown 格式
+            cleaned = ai_content.strip()
+            cleaned = re.sub(r'^```json\s*', '', cleaned, flags=re.MULTILINE)
+            cleaned = re.sub(r'^```\s*', '', cleaned, flags=re.MULTILINE)
+            cleaned = cleaned.strip()
+
+            # 提取 JSON
+            json_start = -1
+            for i, c in enumerate(cleaned):
+                if c == '{':
+                    json_start = i
+                    break
+
+            if json_start >= 0:
+                brace_count = 0
+                json_end = -1
+                for i in range(json_start, len(cleaned)):
+                    if cleaned[i] == '{':
+                        brace_count += 1
+                    elif cleaned[i] == '}':
+                        brace_count -= 1
+                        if brace_count == 0:
+                            json_end = i + 1
+                            break
+
+                if json_end > json_start:
+                    json_str = cleaned[json_start:json_end]
+                    result = json.loads(json_str)
+                    logger.info(f"TXT AI 分析成功: {filename}, 提取到 {len(result.get('key_value_pairs', []))} 个键值对")
+                    return result
+
+            logger.warning(f"无法从 AI 返回中解析 JSON: {filename}")
+            return {}
+
+        except json.JSONDecodeError as e:
+            logger.error(f"JSON 解析失败: {str(e)}, 文件: {filename}")
+            return {}
+        except Exception as e:
+            logger.error(f"AI 分析 TXT 失败: {str(e)}, 文件: {filename}", exc_info=True)
+            return {}
+
+    def _format_structured_for_context(self, structured_data: Dict[str, Any], filename: str) -> str:
+        """
+        将结构化数据格式化为上下文文本
+
+        Args:
+            structured_data: AI 分析返回的结构化数据
+            filename: 文件名
+
+        Returns:
+            格式化的文本上下文
+        """
+        parts = []
+
+        # 添加标题
+        parts.append(f"【文档: {filename} - AI 结构化分析结果】")
+
+        # 格式化键值对
+        key_value_pairs = structured_data.get("key_value_pairs", [])
+        if key_value_pairs:
+            parts.append("\n## 关键信息：")
+            for kv in key_value_pairs[:20]:  # 最多 20 个
+                parts.append(f"- {kv.get('key', '')}: {kv.get('value', '')}")
+
+        # 格式化表格数据
+        tables = structured_data.get("tables", [])
+        if tables:
+            parts.append("\n## 表格数据：")
+            for i, table in enumerate(tables[:5]):  # 最多 5 个表格
+                desc = table.get("description", f"表格{i+1}")
+                columns = table.get("columns", [])
+                rows = table.get("rows", [])
+                if columns and rows:
+                    parts.append(f"\n### {desc}")
+                    parts.append("| " + " | ".join(str(c) for c in columns) + " |")
+                    parts.append("| " + " | ".join(["---"] * len(columns)) + " |")
+                    for row in rows[:10]:  # 每个表格最多 10 行
+                        parts.append("| " + " | ".join(str(cell) for cell in row) + " |")
+
+        # 格式化数值数据
+        numeric_data = structured_data.get("numeric_data", [])
+        if numeric_data:
+            parts.append("\n## 数值数据：")
+            for num in numeric_data[:15]:  # 最多 15 个
+                name = num.get("name", "")
+                value = num.get("value", "")
+                unit = num.get("unit", "")
+                parts.append(f"- {name}: {value} {unit}")
+
+        # 添加文本摘要
+        text_summary = structured_data.get("text_summary", "")
+        if text_summary:
+            parts.append(f"\n## 内容摘要：\n{text_summary}")
+
+        return "\n".join(parts)
 
     async def get_template_fields_from_file(
         self,
@@ -675,7 +1042,7 @@ class TemplateFillService:
 
     def _extract_values_from_structured_data(self, source_docs: List[SourceDocument], field_name: str) -> List[str]:
         """
-        从结构化数据（Excel rows）中直接提取指定列的值
+        从结构化数据（Excel rows）或 AI 结构化分析结果中直接提取指定列的值
 
         适用于有 rows 结构的文档数据，无需 LLM 即可提取
 
@@ -689,6 +1056,18 @@ class TemplateFillService:
         all_values = []
 
         for doc in source_docs:
+            # 优先从 AI 结构化数据中提取（适用于 TXT 文件）
+            if doc.ai_structured_data:
+                ai_table = doc.ai_structured_data.get("table", {})
+                columns = ai_table.get("columns", [])
+                rows = ai_table.get("rows", [])
+                if columns and rows:
+                    values = self._extract_column_values(rows, columns, field_name)
+                    if values:
+                        all_values.extend(values)
+                        logger.info(f"从 TXT AI 结构化数据提取到 {len(values)} 个值: {doc.filename}")
+                        break
+
             # 尝试从 structured_data 中提取
             structured = doc.structured_data
 
