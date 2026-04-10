@@ -1,5 +1,5 @@
 import { RouterProvider } from 'react-router-dom';
-import { AuthProvider } from '@/context/AuthContext';
+import { AuthProvider } from '@/contexts/AuthContext';
 import { TemplateFillProvider } from '@/context/TemplateFillContext';
 import { router } from '@/routes';
 import { Toaster } from 'sonner';

@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { useDropzone } from 'react-dropzone';
 import {
   FileText,
@@ -23,7 +23,8 @@ import {
   List,
   MessageSquareCode,
   Tag,
-  HelpCircle
+  HelpCircle,
+  Plus
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -72,8 +73,10 @@ const Documents: React.FC = () => {
   // 上传相关状态
   const [uploading, setUploading] = useState(false);
   const [uploadedFile, setUploadedFile] = useState<File | null>(null);
+  const [uploadedFiles, setUploadedFiles] = useState<File[]>([]);
   const [parseResult, setParseResult] = useState<ExcelParseResult | null>(null);
   const [expandedSheet, setExpandedSheet] = useState<string | null>(null);
+  const [uploadExpanded, setUploadExpanded] = useState(false);
 
   // AI 分析相关状态
   const [analyzing, setAnalyzing] = useState(false);
@@ -210,75 +213,119 @@ const Documents: React.FC = () => {
 
   // 文件上传处理
   const onDrop = async (acceptedFiles: File[]) => {
-    const file = acceptedFiles[0];
-    if (!file) return;
+    if (acceptedFiles.length === 0) return;
 
-    setUploadedFile(file);
     setUploading(true);
-    setParseResult(null);
-    setAiAnalysis(null);
-    setAnalysisCharts(null);
-    setExpandedSheet(null);
-    setMdAnalysis(null);
-    setMdSections([]);
-    setMdStreamingContent('');
+    let successCount = 0;
+    let failCount = 0;
+    const successfulFiles: File[] = [];
 
-    const ext = file.name.split('.').pop()?.toLowerCase();
+    // 逐个上传文件
+    for (const file of acceptedFiles) {
+      const ext = file.name.split('.').pop()?.toLowerCase();
 
-    try {
-      // Excel 文件使用专门的上传接口
-      if (ext === 'xlsx' || ext === 'xls') {
-        const result = await backendApi.uploadExcel(file, {
-          parseAllSheets: parseOptions.parseAllSheets,
-          headerRow: parseOptions.headerRow
-        });
-        if (result.success) {
-          toast.success(`解析成功: ${file.name}`);
-          setParseResult(result);
-          loadDocuments(); // 刷新文档列表
-          if (result.metadata?.sheet_count === 1) {
-            setExpandedSheet(Object.keys(result.data?.sheets || {})[0] || null);
+      try {
+        if (ext === 'xlsx' || ext === 'xls') {
+          const result = await backendApi.uploadExcel(file, {
+            parseAllSheets: parseOptions.parseAllSheets,
+            headerRow: parseOptions.headerRow
+          });
+          if (result.success) {
+            successCount++;
+            successfulFiles.push(file);
+            // 第一个Excel文件设置解析结果供预览
+            if (successCount === 1) {
+              setUploadedFile(file);
+              setParseResult(result);
+              if (result.metadata?.sheet_count === 1) {
+                setExpandedSheet(Object.keys(result.data?.sheets || {})[0] || null);
+              }
+            }
+            loadDocuments();
+          } else {
+            failCount++;
+            toast.error(`${file.name}: ${result.error || '解析失败'}`);
+          }
+        } else if (ext === 'md' || ext === 'markdown') {
+          const result = await backendApi.uploadDocument(file);
+          if (result.task_id) {
+            successCount++;
+            successfulFiles.push(file);
+            if (successCount === 1) {
+              setUploadedFile(file);
+            }
+            // 轮询任务状态
+            let attempts = 0;
+            const checkStatus = async () => {
+              while (attempts < 30) {
+                try {
+                  const status = await backendApi.getTaskStatus(result.task_id);
+                  if (status.status === 'success') {
+                    loadDocuments();
+                    return;
+                  } else if (status.status === 'failure') {
+                    return;
+                  }
+                } catch (e) {
+                  console.error('检查状态失败', e);
+                }
+                await new Promise(resolve => setTimeout(resolve, 2000));
+                attempts++;
+              }
+            };
+            checkStatus();
+          } else {
+            failCount++;
           }
         } else {
-          toast.error(result.error || '解析失败');
-        }
-      } else if (ext === 'md' || ext === 'markdown') {
-        // Markdown 文件：获取大纲
-        await fetchMdOutline();
-      } else {
-        // 其他文档使用通用上传接口
-        const result = await backendApi.uploadDocument(file);
-        if (result.task_id) {
-          toast.success(`文件 ${file.name} 已提交处理`);
-          // 轮询任务状态
-          let attempts = 0;
-          const checkStatus = async () => {
-            while (attempts < 30) {
-              try {
-                const status = await backendApi.getTaskStatus(result.task_id);
-                if (status.status === 'success') {
-                  toast.success(`文件 ${file.name} 处理完成`);
-                  loadDocuments();
-                  return;
-                } else if (status.status === 'failure') {
-                  toast.error(`文件 ${file.name} 处理失败`);
-                  return;
-                }
-              } catch (e) {
-                console.error('检查状态失败', e);
-              }
-              await new Promise(resolve => setTimeout(resolve, 2000));
-              attempts++;
+          // 其他文档使用通用上传接口
+          const result = await backendApi.uploadDocument(file);
+          if (result.task_id) {
+            successCount++;
+            successfulFiles.push(file);
+            if (successCount === 1) {
+              setUploadedFile(file);
             }
-            toast.error(`文件 ${file.name} 处理超时`);
-          };
-          checkStatus();
+            // 轮询任务状态
+            let attempts = 0;
+            const checkStatus = async () => {
+              while (attempts < 30) {
+                try {
+                  const status = await backendApi.getTaskStatus(result.task_id);
+                  if (status.status === 'success') {
+                    loadDocuments();
+                    return;
+                  } else if (status.status === 'failure') {
+                    return;
+                  }
+                } catch (e) {
+                  console.error('检查状态失败', e);
+                }
+                await new Promise(resolve => setTimeout(resolve, 2000));
+                attempts++;
+              }
+            };
+            checkStatus();
+          } else {
+            failCount++;
+          }
         }
+      } catch (error: any) {
+        failCount++;
+        toast.error(`${file.name}: ${error.message || '上传失败'}`);
       }
-    } catch (error: any) {
-      toast.error(error.message || '上传失败');
-    } finally {
-      setUploading(false);
+    }
+
+    setUploading(false);
+    loadDocuments();
+
+    if (successCount > 0) {
+      toast.success(`成功上传 ${successCount} 个文件`);
+      setUploadedFiles(prev => [...prev, ...successfulFiles]);
+      setUploadExpanded(true);
+    }
+    if (failCount > 0) {
+      toast.error(`${failCount} 个文件上传失败`);
     }
   };
 
@@ -291,7 +338,7 @@ const Documents: React.FC = () => {
       'text/markdown': ['.md'],
       'text/plain': ['.txt']
     },
-    maxFiles: 1
+    multiple: true
   });
 
   // AI 分析处理
@@ -449,11 +496,23 @@ const Documents: React.FC = () => {
 
   const handleDeleteFile = () => {
     setUploadedFile(null);
+    setUploadedFiles([]);
     setParseResult(null);
     setAiAnalysis(null);
     setAnalysisCharts(null);
     setExpandedSheet(null);
     toast.success('文件已清除');
+  };
+
+  const handleRemoveUploadedFile = (index: number) => {
+    setUploadedFiles(prev => {
+      const newFiles = prev.filter((_, i) => i !== index);
+      if (newFiles.length === 0) {
+        setUploadedFile(null);
+      }
+      return newFiles;
+    });
+    toast.success('文件已从列表移除');
   };
 
   const handleDelete = async (docId: string) => {
@@ -615,7 +674,7 @@ const Documents: React.FC = () => {
           <h1 className="text-3xl font-extrabold tracking-tight">文档中心</h1>
           <p className="text-muted-foreground">上传文档，自动解析并使用 AI 进行深度分析</p>
         </div>
-        <Button variant="outline" className="rounded-xl gap-2" onClick={loadDocuments}>
+        <Button variant="outline" className="rounded-xl gap-2" onClick={() => loadDocuments()}>
           <RefreshCcw size={18} />
           <span>刷新</span>
         </Button>
@@ -640,7 +699,82 @@ const Documents: React.FC = () => {
             </CardHeader>
             {uploadPanelOpen && (
               <CardContent className="space-y-4">
-                {!uploadedFile ? (
+                {uploadedFiles.length > 0 || uploadedFile ? (
+                  <div className="space-y-3">
+                    {/* 文件列表头部 */}
+                    <div
+                      className="flex items-center justify-between p-3 bg-muted/50 rounded-xl cursor-pointer hover:bg-muted/70 transition-colors"
+                      onClick={() => setUploadExpanded(!uploadExpanded)}
+                    >
+                      <div className="flex items-center gap-3">
+                        <div className="w-10 h-10 rounded-lg bg-primary/10 text-primary flex items-center justify-center">
+                          <Upload size={20} />
+                        </div>
+                        <div>
+                          <p className="font-semibold text-sm">
+                            已上传 {(uploadedFiles.length > 0 ? uploadedFiles : [uploadedFile]).length} 个文件
+                          </p>
+                          <p className="text-xs text-muted-foreground">
+                            {uploadExpanded ? '点击收起' : '点击展开查看'}
+                          </p>
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            handleDeleteFile();
+                          }}
+                          className="text-destructive hover:text-destructive"
+                        >
+                          <Trash2 size={14} className="mr-1" />
+                          清空
+                        </Button>
+                        {uploadExpanded ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
+                      </div>
+                    </div>
+
+                    {/* 展开的文件列表 */}
+                    {uploadExpanded && (
+                      <div className="space-y-2 border rounded-xl p-3">
+                        {(uploadedFiles.length > 0 ? uploadedFiles : [uploadedFile]).filter(Boolean).map((file, index) => (
+                          <div key={index} className="flex items-center gap-3 p-2 bg-background rounded-lg">
+                            <div className={cn(
+                              "w-8 h-8 rounded flex items-center justify-center",
+                              isExcelFile(file?.name || '') ? "bg-emerald-500/10 text-emerald-500" : "bg-blue-500/10 text-blue-500"
+                            )}>
+                              {isExcelFile(file?.name || '') ? <FileSpreadsheet size={16} /> : <FileText size={16} />}
+                            </div>
+                            <div className="flex-1 min-w-0">
+                              <p className="text-sm truncate">{file?.name}</p>
+                              <p className="text-xs text-muted-foreground">{formatFileSize(file?.size || 0)}</p>
+                            </div>
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              className="text-destructive hover:bg-destructive/10"
+                              onClick={() => handleRemoveUploadedFile(index)}
+                            >
+                              <Trash2 size={14} />
+                            </Button>
+                          </div>
+                        ))}
+
+                        {/* 继续添加按钮 */}
+                        <div
+                          {...getRootProps()}
+                          className="flex items-center justify-center gap-2 p-3 border-2 border-dashed rounded-lg cursor-pointer hover:border-primary/50 hover:bg-primary/5 transition-colors"
+                        >
+                          <input {...getInputProps()} multiple={true} />
+                          <Plus size={16} className="text-muted-foreground" />
+                          <span className="text-sm text-muted-foreground">继续添加更多文件</span>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                ) : (
                   <div
                     {...getRootProps()}
                     className={cn(
@@ -649,7 +783,7 @@ const Documents: React.FC = () => {
                       uploading && "opacity-50 pointer-events-none"
                     )}
                   >
-                    <input {...getInputProps()} />
+                    <input {...getInputProps()} multiple={true} />
                     <div className="w-14 h-14 rounded-xl bg-primary/10 text-primary flex items-center justify-center mb-4 group-hover:scale-110 transition-transform">
                       {uploading ? <Loader2 className="animate-spin" size={28} /> : <Upload size={28} />}
                     </div>
@@ -670,30 +804,6 @@ const Documents: React.FC = () => {
                         <File size={12} className="mr-1" /> 文本
                       </Badge>
                     </div>
-                  </div>
-                ) : (
-                  <div className="space-y-4">
-                    <div className="flex items-center gap-3 p-3 bg-muted/30 rounded-xl">
-                      <div className={cn(
-                        "w-10 h-10 rounded-lg flex items-center justify-center",
-                        isExcelFile(uploadedFile.name) ? "bg-emerald-500/10 text-emerald-500" : "bg-blue-500/10 text-blue-500"
-                      )}>
-                        {isExcelFile(uploadedFile.name) ? <FileSpreadsheet size={20} /> : <FileText size={20} />}
-                      </div>
-                      <div className="flex-1 min-w-0">
-                        <p className="font-semibold text-sm truncate">{uploadedFile.name}</p>
-                        <p className="text-xs text-muted-foreground">{formatFileSize(uploadedFile.size)}</p>
-                      </div>
-                      <Button variant="ghost" size="icon" className="text-destructive hover:bg-destructive/10" onClick={handleDeleteFile}>
-                        <Trash2 size={16} />
-                      </Button>
-                    </div>
-
-                    {isExcelFile(uploadedFile.name) && (
-                      <Button onClick={() => onDrop([uploadedFile])} className="w-full" disabled={uploading}>
-                        {uploading ? '解析中...' : '重新解析'}
-                      </Button>
-                    )}
                   </div>
                 )}
               </CardContent>

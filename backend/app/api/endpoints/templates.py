@@ -23,6 +23,44 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/templates", tags=["表格模板"])
 
 
+# ==================== 辅助函数 ====================
+
+async def update_task_status(
+    task_id: str,
+    status: str,
+    progress: int = 0,
+    message: str = "",
+    result: dict = None,
+    error: str = None
+):
+    """
+    更新任务状态，同时写入 Redis 和 MongoDB
+    """
+    from app.core.database import redis_db
+
+    meta = {"progress": progress, "message": message}
+    if result:
+        meta["result"] = result
+    if error:
+        meta["error"] = error
+
+    try:
+        await redis_db.set_task_status(task_id, status, meta)
+    except Exception as e:
+        logger.warning(f"Redis 任务状态更新失败: {e}")
+
+    try:
+        await mongodb.update_task(
+            task_id=task_id,
+            status=status,
+            message=message,
+            result=result,
+            error=error
+        )
+    except Exception as e:
+        logger.warning(f"MongoDB 任务状态更新失败: {e}")
+
+
 # ==================== 请求/响应模型 ====================
 
 class TemplateFieldRequest(BaseModel):
@@ -41,6 +79,7 @@ class FillRequest(BaseModel):
     source_doc_ids: Optional[List[str]] = None  # MongoDB 文档 ID 列表
     source_file_paths: Optional[List[str]] = None  # 源文档文件路径列表
     user_hint: Optional[str] = None
+    task_id: Optional[str] = None  # 可选的任务ID，用于任务历史跟踪
 
 
 class ExportRequest(BaseModel):
@@ -162,20 +201,17 @@ async def upload_joint_template(
                 )
 
     try:
-        # 1. 保存模板文件并提取字段
+        # 1. 保存模板文件
         template_content = await template_file.read()
         template_path = file_service.save_uploaded_file(
             template_content,
             template_file.filename,
             subfolder="templates"
         )
-        template_fields = await template_fill_service.get_template_fields_from_file(
-            template_path,
-            template_ext
-        )
 
-        # 2. 处理源文档 - 保存文件
+        # 2. 保存并解析源文档 - 提取内容用于生成表头
         source_file_info = []
+        source_contents = []
         for sf in source_files:
             if sf.filename:
                 sf_content = await sf.read()
@@ -190,10 +226,81 @@ async def upload_joint_template(
                     "filename": sf.filename,
                     "ext": sf_ext
                 })
+                # 解析源文档获取内容（用于 AI 生成表头）
+                try:
+                    from app.core.document_parser import ParserFactory
+                    parser = ParserFactory.get_parser(sf_path)
+                    parse_result = parser.parse(sf_path)
+                    if parse_result.success and parse_result.data:
+                        # 获取原始内容
+                        content = parse_result.data.get("content", "")[:5000] if parse_result.data.get("content") else ""
+
+                        # 获取标题（可能在顶层或structured_data内）
+                        titles = parse_result.data.get("titles", [])
+                        if not titles and parse_result.data.get("structured_data"):
+                            titles = parse_result.data.get("structured_data", {}).get("titles", [])
+                        titles = titles[:10] if titles else []
+
+                        # 获取表格数量（可能在顶层或structured_data内）
+                        tables = parse_result.data.get("tables", [])
+                        if not tables and parse_result.data.get("structured_data"):
+                            tables = parse_result.data.get("structured_data", {}).get("tables", [])
+                        tables_count = len(tables) if tables else 0
+
+                        # 获取表格内容摘要（用于 AI 理解源文档结构）
+                        tables_summary = ""
+                        if tables:
+                            tables_summary = "\n【文档中的表格】:\n"
+                            for idx, table in enumerate(tables[:5]):  # 最多5个表格
+                                if isinstance(table, dict):
+                                    headers = table.get("headers", [])
+                                    rows = table.get("rows", [])
+                                    if headers:
+                                        tables_summary += f"表格{idx+1}表头: {', '.join(str(h) for h in headers)}\n"
+                                    if rows:
+                                        tables_summary += f"表格{idx+1}前3行: "
+                                        for row_idx, row in enumerate(rows[:3]):
+                                            if isinstance(row, list):
+                                                tables_summary += " | ".join(str(c) for c in row) + "; "
+                                            elif isinstance(row, dict):
+                                                tables_summary += " | ".join(str(row.get(h, "")) for h in headers if headers) + "; "
+                                        tables_summary += "\n"
+
+                        source_contents.append({
+                            "filename": sf.filename,
+                            "doc_type": sf_ext,
+                            "content": content,
+                            "titles": titles,
+                            "tables_count": tables_count,
+                            "tables_summary": tables_summary
+                        })
+                        logger.info(f"[DEBUG] source_contents built: filename={sf.filename}, content_len={len(content)}, titles_count={len(titles)}, tables_count={tables_count}")
+                        if tables_summary:
+                            logger.info(f"[DEBUG] tables_summary preview: {tables_summary[:300]}")
+                except Exception as e:
+                    logger.warning(f"解析源文档失败 {sf.filename}: {e}")
+
+        # 3. 根据源文档内容生成表头
+        template_fields = await template_fill_service.get_template_fields_from_file(
+            template_path,
+            template_ext,
+            source_contents=source_contents  # 传递源文档内容
+        )
 
         # 3. 异步处理源文档到MongoDB
         task_id = str(uuid.uuid4())
         if source_file_info:
+            # 保存任务记录到 MongoDB
+            try:
+                await mongodb.insert_task(
+                    task_id=task_id,
+                    task_type="source_process",
+                    status="pending",
+                    message=f"开始处理 {len(source_file_info)} 个源文档"
+                )
+            except Exception as mongo_err:
+                logger.warning(f"MongoDB 保存任务记录失败: {mongo_err}")
+
             background_tasks.add_task(
                 process_source_documents,
                 task_id=task_id,
@@ -232,12 +339,10 @@ async def upload_joint_template(
 
 async def process_source_documents(task_id: str, files: List[dict]):
     """异步处理源文档，存入MongoDB"""
-    from app.core.database import redis_db
-
     try:
-        await redis_db.set_task_status(
+        await update_task_status(
             task_id, status="processing",
-            meta={"progress": 0, "message": "开始处理源文档"}
+            progress=0, message="开始处理源文档"
         )
 
         doc_ids = []
@@ -266,22 +371,24 @@ async def process_source_documents(task_id: str, files: List[dict]):
                 logger.error(f"源文档处理异常: {file_info['filename']}, error: {str(e)}")
 
             progress = int((i + 1) / len(files) * 100)
-            await redis_db.set_task_status(
+            await update_task_status(
                 task_id, status="processing",
-                meta={"progress": progress, "message": f"已处理 {i+1}/{len(files)}"}
+                progress=progress, message=f"已处理 {i+1}/{len(files)}"
             )
 
-        await redis_db.set_task_status(
+        await update_task_status(
             task_id, status="success",
-            meta={"progress": 100, "message": "源文档处理完成", "doc_ids": doc_ids}
+            progress=100, message="源文档处理完成",
+            result={"doc_ids": doc_ids}
         )
         logger.info(f"所有源文档处理完成: {len(doc_ids)}个")
 
     except Exception as e:
         logger.error(f"源文档批量处理失败: {str(e)}")
-        await redis_db.set_task_status(
+        await update_task_status(
             task_id, status="failure",
-            meta={"error": str(e)}
+            progress=0, message="源文档处理失败",
+            error=str(e)
         )
 
 
@@ -340,7 +447,27 @@ async def fill_template(
     Returns:
         填写结果
     """
+    # 生成或使用传入的 task_id
+    task_id = request.task_id or str(uuid.uuid4())
+
     try:
+        # 创建任务记录到 MongoDB
+        try:
+            await mongodb.insert_task(
+                task_id=task_id,
+                task_type="template_fill",
+                status="processing",
+                message=f"开始填表任务: {len(request.template_fields)} 个字段"
+            )
+        except Exception as mongo_err:
+            logger.warning(f"MongoDB 创建任务记录失败: {mongo_err}")
+
+        # 更新进度 - 开始
+        await update_task_status(
+            task_id, "processing",
+            progress=0, message="开始处理..."
+        )
+
         # 转换字段
         fields = [
             TemplateField(
@@ -353,17 +480,51 @@ async def fill_template(
             for f in request.template_fields
         ]
 
+        # 从 template_id 提取文件类型
+        template_file_type = "xlsx"  # 默认类型
+        if request.template_id:
+            ext = request.template_id.split('.')[-1].lower()
+            if ext in ["xlsx", "xls"]:
+                template_file_type = "xlsx"
+            elif ext == "docx":
+                template_file_type = "docx"
+
+        # 更新进度 - 准备开始填写
+        await update_task_status(
+            task_id, "processing",
+            progress=10, message=f"准备填写 {len(fields)} 个字段..."
+        )
+
         # 执行填写
         result = await template_fill_service.fill_template(
             template_fields=fields,
             source_doc_ids=request.source_doc_ids,
             source_file_paths=request.source_file_paths,
-            user_hint=request.user_hint
+            user_hint=request.user_hint,
+            template_id=request.template_id,
+            template_file_type=template_file_type,
+            task_id=task_id
         )
 
-        return result
+        # 更新为成功
+        await update_task_status(
+            task_id, "success",
+            progress=100, message="填表完成",
+            result={
+                "field_count": len(fields),
+                "max_rows": result.get("max_rows", 0)
+            }
+        )
+
+        return {**result, "task_id": task_id}
 
     except Exception as e:
+        # 更新为失败
+        await update_task_status(
+            task_id, "failure",
+            progress=0, message="填表失败",
+            error=str(e)
+        )
         logger.error(f"填写表格失败: {str(e)}")
         raise HTTPException(status_code=500, detail=f"填写失败: {str(e)}")
 

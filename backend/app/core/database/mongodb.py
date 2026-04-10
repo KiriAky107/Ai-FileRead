@@ -59,6 +59,11 @@ class MongoDB:
         """RAG索引集合 - 存储字段语义索引"""
         return self.db["rag_index"]
 
+    @property
+    def tasks(self):
+        """任务集合 - 存储任务历史记录"""
+        return self.db["tasks"]
+
     # ==================== 文档操作 ====================
 
     async def insert_document(
@@ -264,7 +269,127 @@ class MongoDB:
         await self.rag_index.create_index("table_name")
         await self.rag_index.create_index("field_name")
 
+        # 任务集合索引
+        await self.tasks.create_index("task_id", unique=True)
+        await self.tasks.create_index("created_at")
+
         logger.info("MongoDB 索引创建完成")
+
+    # ==================== 任务历史操作 ====================
+
+    async def insert_task(
+        self,
+        task_id: str,
+        task_type: str,
+        status: str = "pending",
+        message: str = "",
+        result: Optional[Dict[str, Any]] = None,
+        error: Optional[str] = None,
+    ) -> str:
+        """
+        插入任务记录
+
+        Args:
+            task_id: 任务ID
+            task_type: 任务类型
+            status: 任务状态
+            message: 任务消息
+            result: 任务结果
+            error: 错误信息
+
+        Returns:
+            插入文档的ID
+        """
+        task = {
+            "task_id": task_id,
+            "task_type": task_type,
+            "status": status,
+            "message": message,
+            "result": result,
+            "error": error,
+            "created_at": datetime.utcnow(),
+            "updated_at": datetime.utcnow(),
+        }
+        result_obj = await self.tasks.insert_one(task)
+        return str(result_obj.inserted_id)
+
+    async def update_task(
+        self,
+        task_id: str,
+        status: Optional[str] = None,
+        message: Optional[str] = None,
+        result: Optional[Dict[str, Any]] = None,
+        error: Optional[str] = None,
+    ) -> bool:
+        """
+        更新任务状态
+
+        Args:
+            task_id: 任务ID
+            status: 任务状态
+            message: 任务消息
+            result: 任务结果
+            error: 错误信息
+
+        Returns:
+            是否更新成功
+        """
+        from bson import ObjectId
+
+        update_data = {"updated_at": datetime.utcnow()}
+        if status is not None:
+            update_data["status"] = status
+        if message is not None:
+            update_data["message"] = message
+        if result is not None:
+            update_data["result"] = result
+        if error is not None:
+            update_data["error"] = error
+
+        update_result = await self.tasks.update_one(
+            {"task_id": task_id},
+            {"$set": update_data}
+        )
+        return update_result.modified_count > 0
+
+    async def get_task(self, task_id: str) -> Optional[Dict[str, Any]]:
+        """根据task_id获取任务"""
+        task = await self.tasks.find_one({"task_id": task_id})
+        if task:
+            task["_id"] = str(task["_id"])
+        return task
+
+    async def list_tasks(
+        self,
+        limit: int = 50,
+        skip: int = 0,
+    ) -> List[Dict[str, Any]]:
+        """
+        获取任务列表
+
+        Args:
+            limit: 返回数量
+            skip: 跳过数量
+
+        Returns:
+            任务列表
+        """
+        cursor = self.tasks.find().sort("created_at", -1).skip(skip).limit(limit)
+        tasks = []
+        async for task in cursor:
+            task["_id"] = str(task["_id"])
+            # 转换 datetime 为字符串
+            if task.get("created_at"):
+                task["created_at"] = task["created_at"].isoformat()
+            if task.get("updated_at"):
+                task["updated_at"] = task["updated_at"].isoformat()
+            tasks.append(task)
+        return tasks
+
+    async def delete_task(self, task_id: str) -> bool:
+        """删除任务"""
+        result = await self.tasks.delete_one({"task_id": task_id})
+        return result.deleted_count > 0
 
 
 # ==================== 全局单例 ====================
