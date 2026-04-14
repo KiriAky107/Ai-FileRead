@@ -19,26 +19,43 @@ async def health_check() -> Dict[str, Any]:
     返回各数据库连接状态和应用信息
     """
     # 检查各数据库连接状态
-    mysql_status = "connected"
-    mongodb_status = "connected"
-    redis_status = "connected"
+    mysql_status = "unknown"
+    mongodb_status = "unknown"
+    redis_status = "unknown"
 
     try:
         if mysql_db.async_engine is None:
             mysql_status = "disconnected"
-    except Exception:
+        else:
+            # 实际执行一次查询验证连接
+            from sqlalchemy import text
+            async with mysql_db.async_engine.connect() as conn:
+                await conn.execute(text("SELECT 1"))
+            mysql_status = "connected"
+    except Exception as e:
+        logger.warning(f"MySQL 健康检查失败: {e}")
         mysql_status = "error"
 
     try:
         if mongodb.client is None:
             mongodb_status = "disconnected"
-    except Exception:
+        else:
+            # 实际 ping 验证
+            await mongodb.client.admin.command('ping')
+            mongodb_status = "connected"
+    except Exception as e:
+        logger.warning(f"MongoDB 健康检查失败: {e}")
         mongodb_status = "error"
 
     try:
-        if not redis_db.is_connected:
+        if not redis_db.is_connected or redis_db.client is None:
             redis_status = "disconnected"
-    except Exception:
+        else:
+            # 实际执行 ping 验证
+            await redis_db.client.ping()
+            redis_status = "connected"
+    except Exception as e:
+        logger.warning(f"Redis 健康检查失败: {e}")
         redis_status = "error"
 
     return {
