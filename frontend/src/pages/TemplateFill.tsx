@@ -245,27 +245,13 @@ const TemplateFill: React.FC = () => {
   };
 
   const handleExport = async () => {
-    if (!templateFile || !filledResult) {
-      console.error('handleExport 失败: templateFile=', templateFile, 'filledResult=', filledResult);
-      toast.error('数据不完整，无法导出');
-      return;
-    }
-
-    console.log('=== handleExport 调试 ===');
-    console.log('templateFile:', templateFile);
-    console.log('templateId:', templateId);
-    console.log('filledResult:', filledResult);
-    console.log('filledResult.filled_data:', filledResult.filled_data);
-    console.log('=========================');
-
-    const ext = templateFile.name.split('.').pop()?.toLowerCase();
+    if (!templateFile || !filledResult) return;
 
     try {
-      // 使用新的 fillAndExportTemplate 直接填充原始模板
-      const blob = await backendApi.fillAndExportTemplate(
-        templateId || '',
+      const blob = await backendApi.exportFilledTemplate(
+        templateId || 'temp',
         filledResult.filled_data || {},
-        ext === 'docx' ? 'docx' : 'xlsx'
+        'xlsx'
       );
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
@@ -275,7 +261,6 @@ const TemplateFill: React.FC = () => {
       URL.revokeObjectURL(url);
       toast.success('导出成功');
     } catch (err: any) {
-      console.error('导出失败:', err);
       toast.error('导出失败: ' + (err.message || '未知错误'));
     }
   };
