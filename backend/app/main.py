@@ -1,6 +1,13 @@
 """
 FastAPI 应用主入口
 """
+# ========== 压制 MongoDB 疯狂刷屏日志 ==========
+import logging
+logging.getLogger("pymongo").setLevel(logging.WARNING)
+logging.getLogger("pymongo.topology").setLevel(logging.WARNING)
+logging.getLogger("urllib3").setLevel(logging.WARNING)
+# ==============================================
+
 import logging
 import logging.handlers
 import sys

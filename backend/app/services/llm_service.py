@@ -42,41 +42,86 @@ class LLMService:
             "Content-Type": "application/json"
         }
 
+        # DeepSeek API temperature 范围: (0, 2]
+        if temperature < 0.01:
+            temperature = 0.01
+        elif temperature > 2.0:
+            temperature = 2.0
+
         payload = {
             "model": self.model_name,
             "messages": messages,
             "temperature": temperature
         }
 
+        # DeepSeek API 限制 max_tokens 范围
         if max_tokens:
+            if max_tokens > 8192:
+                max_tokens = 8192
             payload["max_tokens"] = max_tokens
+
+        # 移除不兼容的参数
+        for key in ["stream", "stop", "presence_penalty", "frequency_penalty", "logit_bias"]:
+            kwargs.pop(key, None)
 
         # 添加其他参数
         payload.update(kwargs)
 
-        try:
-            logger.info(f"LLM API 请求: model={self.model_name}, temperature={temperature}, max_tokens={max_tokens}")
-            logger.info(f"消息数量: {len(messages)}")
-            for i, msg in enumerate(messages):
-                logger.info(f"消息[{i}]: role={msg.get('role')}, content长度={len(msg.get('content', ''))}")
+        # 验证消息格式
+        validated_messages = []
+        for i, msg in enumerate(messages):
+            role = msg.get("role", "")
+            content = msg.get("content", "")
 
-            async with httpx.AsyncClient(timeout=60.0) as client:
+            # 确保 content 是字符串
+            if not isinstance(content, str):
+                logger.warning(f"消息[{i}] content 不是字符串类型: {type(content)}，转换为字符串")
+                content = str(content)
+
+            # 确保 role 有效
+            if role not in ["system", "user", "assistant"]:
+                logger.warning(f"消息[{i}] role 无效: {role}，跳过")
+                continue
+
+            validated_messages.append({"role": role, "content": content})
+
+        payload["messages"] = validated_messages
+        logger.info(f"验证后消息数量: {len(validated_messages)}")
+
+        try:
+            logger.info(f"LLM API 请求: model={self.model_name}, base_url={self.base_url}, temperature={temperature}, max_tokens={max_tokens}")
+            logger.info(f"消息数量: {len(messages)}")
+            total_content_len = sum(len(msg.get('content', '')) for msg in messages)
+            logger.info(f"总内容长度: {total_content_len}")
+
+            async with httpx.AsyncClient(timeout=120.0) as client:
                 response = await client.post(
                     f"{self.base_url}/chat/completions",
                     headers=headers,
                     json=payload
                 )
+
                 logger.info(f"LLM API 响应状态: {response.status_code}")
+
                 if response.status_code != 200:
-                    logger.error(f"LLM API 响应内容: {response.text}")
+                    error_text = response.text
+                    logger.error(f"LLM API 错误响应: {error_text}")
+                    # 尝试解析错误详情
+                    try:
+                        error_json = response.json()
+                        error_msg = error_json.get("error", {}).get("message", error_text)
+                        logger.error(f"错误详情: {error_msg}")
+                    except:
+                        pass
+
                 response.raise_for_status()
                 return response.json()
 
         except httpx.HTTPStatusError as e:
-            logger.error(f"LLM API 请求失败: {e.response.status_code} - {e.response.text}")
+            logger.error(f"LLM API HTTP 错误: {e.response.status_code} - {e.response.text}")
             raise
         except Exception as e:
-            logger.error(f"LLM API 调用异常: {str(e)}")
+            logger.error(f"LLM API 调用异常: {str(e)}", exc_info=True)
             raise
 
     def extract_message_content(self, response: Dict[str, Any]) -> str:
@@ -119,6 +164,10 @@ class LLMService:
             "Content-Type": "application/json"
         }
 
+        # DeepSeek API 限制
+        if max_tokens and max_tokens > 8192:
+            max_tokens = 8192
+
         payload = {
             "model": self.model_name,
             "messages": messages,
@@ -129,9 +178,14 @@ class LLMService:
         if max_tokens:
             payload["max_tokens"] = max_tokens
 
+        # 移除不兼容的参数
+        for key in ["stop", "presence_penalty", "frequency_penalty", "logit_bias"]:
+            kwargs.pop(key, None)
         payload.update(kwargs)
 
         try:
+            logger.info(f"LLM 流式 API 请求: model={self.model_name}, max_tokens={max_tokens}")
+
             async with httpx.AsyncClient(timeout=120.0) as client:
                 async with client.stream(
                     "POST",
@@ -139,9 +193,14 @@ class LLMService:
                     headers=headers,
                     json=payload
                 ) as response:
+                    if response.status_code != 200:
+                        error_text = await response.aread()
+                        logger.error(f"LLM 流式 API 错误: {response.status_code} - {error_text}")
+                        response.raise_for_status()
+
                     async for line in response.aiter_lines():
                         if line.startswith("data: "):
-                            data = line[6:]  # Remove "data: " prefix
+                            data = line[6:]
                             if data == "[DONE]":
                                 break
                             try:
@@ -157,7 +216,7 @@ class LLMService:
             logger.error(f"LLM 流式 API 请求失败: {e.response.status_code}")
             raise
         except Exception as e:
-            logger.error(f"LLM 流式 API 调用异常: {str(e)}")
+            logger.error(f"LLM 流式 API 调用异常: {str(e)}", exc_info=True)
             raise
 
     async def analyze_excel_data(
