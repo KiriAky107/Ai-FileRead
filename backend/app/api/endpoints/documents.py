@@ -257,6 +257,50 @@ async def process_document(
             structured_data=result.data.get("structured_data")
         )
 
+        # 如果是 Word 文档，使用 AI 深度解析
+        if doc_type == "docx":
+            await redis_db.set_task_status(
+                task_id, status="processing",
+                meta={"progress": 40, "message": "正在使用 AI 解析 Word 文档"}
+            )
+
+            try:
+                from app.services.word_ai_service import word_ai_service
+
+                logger.info(f"开始 AI 解析 Word 文档: {original_filename}")
+                ai_result = await word_ai_service.parse_word_with_ai(
+                    file_path=file_path,
+                    user_hint="请提取文档中的所有结构化数据，包括表格、键值对、列表项等"
+                )
+
+                if ai_result.get("success"):
+                    # 更新 MongoDB 文档，添加 AI 解析结果
+                    ai_data = {
+                        "ai_parsed": True,
+                        "parse_type": ai_result.get("type", "unknown"),
+                        "headers": ai_result.get("headers", []),
+                        "rows": ai_result.get("rows", []),
+                        "tables": ai_result.get("tables", []),
+                        "key_values": ai_result.get("key_values", {}),
+                        "list_items": ai_result.get("list_items", []),
+                        "summary": ai_result.get("summary", ""),
+                        "description": ai_result.get("description", "")
+                    }
+
+                    await mongodb.update_document(doc_id, {
+                        "ai_analysis": ai_data,
+                        "structured_data": {
+                            **result.data.get("structured_data", {}),
+                            **ai_data
+                        }
+                    })
+                    logger.info(f"Word AI 解析成功: {original_filename}, type={ai_result.get('type')}")
+                else:
+                    logger.warning(f"Word AI 解析返回失败: {ai_result.get('error')}")
+
+            except Exception as e:
+                logger.error(f"Word AI 解析异常: {str(e)}", exc_info=True)
+
         # 如果是 Excel，存储到 MySQL + AI生成描述 + RAG索引
         if doc_type in ["xlsx", "xls"]:
             await update_task_status(

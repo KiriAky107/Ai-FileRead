@@ -13,6 +13,7 @@ from app.services.llm_service import llm_service
 from app.core.document_parser import ParserFactory
 from app.services.markdown_ai_service import markdown_ai_service
 from app.services.rag_service import rag_service
+from app.services.word_ai_service import word_ai_service
 
 logger = logging.getLogger(__name__)
 

@@ -65,7 +65,17 @@ class LLMService:
                 return response.json()
 
         except httpx.HTTPStatusError as e:
-            logger.error(f"LLM API 请求失败: {e.response.status_code} - {e.response.text}")
+            error_detail = e.response.text
+            logger.error(f"LLM API 请求失败: {e.response.status_code} - {error_detail}")
+            # 尝试解析错误信息
+            try:
+                import json
+                err_json = json.loads(error_detail)
+                err_code = err_json.get("error", {}).get("code", "unknown")
+                err_msg = err_json.get("error", {}).get("message", "unknown")
+                logger.error(f"API 错误码: {err_code}, 错误信息: {err_msg}")
+            except:
+                pass
             raise
         except Exception as e:
             logger.error(f"LLM API 调用异常: {str(e)}")
@@ -322,6 +332,154 @@ Excel 数据概览:
 
         except Exception as e:
             logger.error(f"自定义模板分析失败: {str(e)}")
+            return {
+                "success": False,
+                "error": str(e),
+                "analysis": None
+            }
+
+    async def chat_with_images(
+        self,
+        text: str,
+        images: List[Dict[str, str]],
+        temperature: float = 0.7,
+        max_tokens: Optional[int] = None
+    ) -> Dict[str, Any]:
+        """
+        调用视觉模型 API（支持图片输入）
+
+        Args:
+            text: 文本内容
+            images: 图片列表，每项包含 base64 编码和 mime_type
+                   格式: [{"base64": "...", "mime_type": "image/png"}, ...]
+            temperature: 温度参数
+            max_tokens: 最大 token 数
+
+        Returns:
+            Dict[str, Any]: API 响应结果
+        """
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json"
+        }
+
+        # 构建图片内容
+        image_contents = []
+        for img in images:
+            image_contents.append({
+                "type": "image_url",
+                "image_url": {
+                    "url": f"data:{img['mime_type']};base64,{img['base64']}"
+                }
+            })
+
+        # 构建消息
+        messages = [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": text
+                    },
+                    *image_contents
+                ]
+            }
+        ]
+
+        payload = {
+            "model": self.model_name,
+            "messages": messages,
+            "temperature": temperature
+        }
+
+        if max_tokens:
+            payload["max_tokens"] = max_tokens
+
+        try:
+            async with httpx.AsyncClient(timeout=120.0) as client:
+                response = await client.post(
+                    f"{self.base_url}/chat/completions",
+                    headers=headers,
+                    json=payload
+                )
+                response.raise_for_status()
+                return response.json()
+
+        except httpx.HTTPStatusError as e:
+            error_detail = e.response.text
+            logger.error(f"视觉模型 API 请求失败: {e.response.status_code} - {error_detail}")
+            # 尝试解析错误信息
+            try:
+                import json
+                err_json = json.loads(error_detail)
+                err_code = err_json.get("error", {}).get("code", "unknown")
+                err_msg = err_json.get("error", {}).get("message", "unknown")
+                logger.error(f"API 错误码: {err_code}, 错误信息: {err_msg}")
+                logger.error(f"请求模型: {self.model_name}, base_url: {self.base_url}")
+            except:
+                pass
+            raise
+        except Exception as e:
+            logger.error(f"视觉模型 API 调用异常: {str(e)}")
+            raise
+
+    async def analyze_images(
+        self,
+        images: List[Dict[str, str]],
+        user_prompt: str = ""
+    ) -> Dict[str, Any]:
+        """
+        分析图片内容（使用视觉模型）
+
+        Args:
+            images: 图片列表，每项包含 base64 编码和 mime_type
+            user_prompt: 用户提示词
+
+        Returns:
+            Dict[str, Any]: 分析结果
+        """
+        prompt = f"""你是一个专业的视觉分析专家。请分析以下图片内容。
+
+{user_prompt if user_prompt else "请详细描述图片中的内容，包括文字、数据、图表、流程等所有可见信息。"}
+
+请按照以下 JSON 格式输出：
+{{
+    "description": "图片内容的详细描述",
+    "text_content": "图片中的文字内容（如有）",
+    "data_extracted": {{"键": "值"}}  // 如果图片中有表格或数据
+}}
+
+如果图片不包含有用信息，请返回空的描述。"""
+
+        try:
+            response = await self.chat_with_images(
+                text=prompt,
+                images=images,
+                temperature=0.1,
+                max_tokens=4000
+            )
+
+            content = self.extract_message_content(response)
+
+            # 解析 JSON
+            import json
+            try:
+                result = json.loads(content)
+                return {
+                    "success": True,
+                    "analysis": result,
+                    "model": self.model_name
+                }
+            except json.JSONDecodeError:
+                return {
+                    "success": True,
+                    "analysis": {"description": content},
+                    "model": self.model_name
+                }
+
+        except Exception as e:
+            logger.error(f"图片分析失败: {str(e)}")
             return {
                 "success": False,
                 "error": str(e),

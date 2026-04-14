@@ -59,7 +59,13 @@ class DocxParser(BaseParser):
             paragraphs = []
             for para in doc.paragraphs:
                 if para.text.strip():
-                    paragraphs.append(para.text)
+                    paragraphs.append({
+                        "text": para.text,
+                        "style": str(para.style.name) if para.style else "Normal"
+                    })
+
+            # 提取段落纯文本（用于 AI 解析）
+            paragraphs_text = [p["text"] for p in paragraphs if p["text"].strip()]
 
             # 提取表格内容
             tables_data = []
@@ -77,8 +83,25 @@ class DocxParser(BaseParser):
                         "column_count": len(table_rows[0]) if table_rows else 0
                     })
 
-            # 合并所有文本
-            full_text = "\n".join(paragraphs)
+            # 提取图片/嵌入式对象信息
+            images_info = self._extract_images_info(doc, path)
+
+            # 合并所有文本（包括图片描述）
+            full_text_parts = []
+            full_text_parts.append("【文档正文】")
+            full_text_parts.extend(paragraphs_text)
+
+            if tables_data:
+                full_text_parts.append("\n【文档表格】")
+                for idx, table in enumerate(tables_data):
+                    full_text_parts.append(f"--- 表格 {idx + 1} ---")
+                    for row in table["rows"]:
+                        full_text_parts.append(" | ".join(str(cell) for cell in row))
+
+            if images_info.get("image_count", 0) > 0:
+                full_text_parts.append(f"\n【文档图片】文档包含 {images_info['image_count']} 张图片/图表")
+
+            full_text = "\n".join(full_text_parts)
 
             # 构建元数据
             metadata = {
@@ -89,7 +112,9 @@ class DocxParser(BaseParser):
                 "table_count": len(tables_data),
                 "word_count": len(full_text),
                 "char_count": len(full_text.replace("\n", "")),
-                "has_tables": len(tables_data) > 0
+                "has_tables": len(tables_data) > 0,
+                "has_images": images_info.get("image_count", 0) > 0,
+                "image_count": images_info.get("image_count", 0)
             }
 
             # 返回结果
@@ -97,12 +122,16 @@ class DocxParser(BaseParser):
                 success=True,
                 data={
                     "content": full_text,
-                    "paragraphs": paragraphs,
+                    "paragraphs": paragraphs_text,
+                    "paragraphs_with_style": paragraphs,
                     "tables": tables_data,
+                    "images": images_info,
                     "word_count": len(full_text),
                     "structured_data": {
                         "paragraphs": paragraphs,
-                        "tables": tables_data
+                        "paragraphs_text": paragraphs_text,
+                        "tables": tables_data,
+                        "images": images_info
                     }
                 },
                 metadata=metadata
@@ -114,6 +143,59 @@ class DocxParser(BaseParser):
                 success=False,
                 error=f"解析 Word 文档失败: {str(e)}"
             )
+
+    def extract_images_as_base64(self, file_path: str) -> List[Dict[str, str]]:
+        """
+        提取 Word 文档中的所有图片，返回 base64 编码列表
+
+        Args:
+            file_path: Word 文件路径
+
+        Returns:
+            图片列表，每项包含 base64 编码和图片类型
+        """
+        import zipfile
+        import base64
+        from io import BytesIO
+
+        images = []
+
+        try:
+            with zipfile.ZipFile(file_path, 'r') as zf:
+                # 查找 word/media 目录下的图片文件
+                for filename in zf.namelist():
+                    if filename.startswith('word/media/'):
+                        # 获取图片类型
+                        ext = filename.split('.')[-1].lower()
+                        mime_types = {
+                            'png': 'image/png',
+                            'jpg': 'image/jpeg',
+                            'jpeg': 'image/jpeg',
+                            'gif': 'image/gif',
+                            'bmp': 'image/bmp'
+                        }
+                        mime_type = mime_types.get(ext, 'image/png')
+
+                        try:
+                            # 读取图片数据并转为 base64
+                            image_data = zf.read(filename)
+                            base64_data = base64.b64encode(image_data).decode('utf-8')
+
+                            images.append({
+                                "filename": filename,
+                                "mime_type": mime_type,
+                                "base64": base64_data,
+                                "size": len(image_data)
+                            })
+                            logger.info(f"提取图片: {filename}, 大小: {len(image_data)} bytes")
+                        except Exception as e:
+                            logger.warning(f"提取图片失败 {filename}: {str(e)}")
+
+        except Exception as e:
+            logger.error(f"打开 Word 文档提取图片失败: {str(e)}")
+
+        logger.info(f"共提取 {len(images)} 张图片")
+        return images
 
     def extract_key_sentences(self, text: str, max_sentences: int = 10) -> List[str]:
         """
@@ -267,6 +349,60 @@ class DocxParser(BaseParser):
             })
 
         return fields
+
+    def _extract_images_info(self, doc: Document, path: Path) -> Dict[str, Any]:
+        """
+        提取 Word 文档中的图片/嵌入式对象信息
+
+        Args:
+            doc: Document 对象
+            path: 文件路径
+
+        Returns:
+            图片信息字典
+        """
+        import zipfile
+        from io import BytesIO
+
+        image_count = 0
+        image_descriptions = []
+        inline_shapes_count = 0
+
+        try:
+            # 方法1: 通过 inline shapes 统计图片
+            try:
+                inline_shapes_count = len(doc.inline_shapes)
+                if inline_shapes_count > 0:
+                    image_count = inline_shapes_count
+                    image_descriptions.append(f"文档包含 {inline_shapes_count} 个嵌入式图形/图片")
+            except Exception:
+                pass
+
+            # 方法2: 通过 ZIP 分析 document.xml 获取图片引用
+            try:
+                with zipfile.ZipFile(path, 'r') as zf:
+                    # 查找 word/media 目录下的图片文件
+                    media_files = [f for f in zf.namelist() if f.startswith('word/media/')]
+                    if media_files and not inline_shapes_count:
+                        image_count = len(media_files)
+                        image_descriptions.append(f"文档包含 {image_count} 个嵌入图片")
+
+                    # 检查是否有页眉页脚中的图片
+                    header_images = [f for f in zf.namelist() if 'header' in f.lower() and f.endswith(('.png', '.jpg', '.jpeg', '.gif', '.bmp'))]
+                    if header_images:
+                        image_descriptions.append(f"页眉/页脚包含 {len(header_images)} 个图片")
+            except Exception:
+                pass
+
+        except Exception as e:
+            logger.warning(f"提取图片信息失败: {str(e)}")
+
+        return {
+            "image_count": image_count,
+            "inline_shapes_count": inline_shapes_count,
+            "descriptions": image_descriptions,
+            "has_images": image_count > 0
+        }
 
     def _infer_field_type_from_hint(self, hint: str) -> str:
         """
