@@ -61,7 +61,10 @@ class TemplateFillService:
         template_fields: List[TemplateField],
         source_doc_ids: Optional[List[str]] = None,
         source_file_paths: Optional[List[str]] = None,
-        user_hint: Optional[str] = None
+        user_hint: Optional[str] = None,
+        template_id: Optional[str] = None,
+        template_file_type: Optional[str] = "xlsx",
+        task_id: Optional[str] = None
     ) -> Dict[str, Any]:
         """
         填写表格模板
@@ -71,6 +74,9 @@ class TemplateFillService:
             source_doc_ids: 源文档 MongoDB ID 列表
             source_file_paths: 源文档文件路径列表
             user_hint: 用户提示（如"请从合同文档中提取"）
+            template_id: 模板ID（用于日志）
+            template_file_type: 模板文件类型
+            task_id: 任务ID（用于日志）
 
         Returns:
             填写结果
@@ -78,7 +84,7 @@ class TemplateFillService:
         filled_data = {}
         fill_details = []
 
-        logger.info(f"开始填表: {len(template_fields)} 个字段, {len(source_doc_ids or [])} 个源文档, {len(source_file_paths or [])} 个文件路径")
+        logger.info(f"开始填表: task_id={task_id}, template_id={template_id}, {len(template_fields)} 个字段, {len(source_doc_ids or [])} 个源文档, {len(source_file_paths or [])} 个文件路径")
 
         # 1. 加载源文档内容
         source_docs = await self._load_source_documents(source_doc_ids, source_file_paths)
@@ -962,9 +968,20 @@ class TemplateFillService:
     async def get_template_fields_from_file(
         self,
         file_path: str,
-        file_type: str = "xlsx"
+        file_type: str = "xlsx",
+        source_contents: Optional[List[Dict[str, Any]]] = None
     ) -> List[TemplateField]:
-        """从模板文件提取字段定义"""
+        """
+        从模板文件提取字段定义
+
+        Args:
+            file_path: 模板文件路径
+            file_type: 文件类型 (xlsx/xls/docx)
+            source_contents: 可选的源文档内容列表，用于 AI 辅助生成表头
+
+        Returns:
+            字段列表
+        """
         fields = []
 
         try:
