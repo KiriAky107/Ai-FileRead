@@ -766,6 +766,7 @@ const Documents: React.FC = () => {
                         <div
                           {...getRootProps()}
                           className="flex items-center justify-center gap-2 p-3 border-2 border-dashed rounded-lg cursor-pointer hover:border-primary/50 hover:bg-primary/5 transition-colors"
+                          onClick={(e) => e.stopPropagation()}
                         >
                           <input {...getInputProps()} multiple={true} />
                           <Plus size={16} className="text-muted-foreground" />

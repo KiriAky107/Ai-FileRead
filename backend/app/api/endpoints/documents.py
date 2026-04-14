@@ -404,18 +404,22 @@ async def process_documents_batch(task_id: str, files: List[dict]):
 
 
 async def index_document_to_rag(doc_id: str, filename: str, result: ParseResult, doc_type: str):
-    """将非结构化文档索引到 RAG"""
+    """将非结构化文档索引到 RAG（使用分块索引）"""
     try:
         content = result.data.get("content", "")
         if content:
+            # 将完整内容传递给 RAG 服务自动分块索引
             rag_service.index_document_content(
                 doc_id=doc_id,
-                content=content[:5000],
+                content=content,  # 传递完整内容，由 RAG 服务自动分块
                 metadata={
                     "filename": filename,
                     "doc_type": doc_type
-                }
+                },
+                chunk_size=500,  # 每块 500 字符
+                chunk_overlap=50  # 块之间 50 字符重叠
             )
+            logger.info(f"RAG 索引完成: {filename}, doc_id={doc_id}")
     except Exception as e:
         logger.warning(f"RAG 索引失败: {str(e)}")
 

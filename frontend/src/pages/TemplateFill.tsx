@@ -626,6 +626,16 @@ const TemplateFill: React.FC = () => {
                         <div className="text-muted-foreground text-xs mt-1">
                           来源: {detail.source} | 置信度: {detail.confidence ? (detail.confidence * 100).toFixed(0) + '%' : 'N/A'}
                         </div>
+                        {detail.warning && (
+                          <div className="mt-2 p-2 bg-yellow-50 border border-yellow-200 rounded-lg text-yellow-700 text-xs">
+                            ⚠️ {detail.warning}
+                          </div>
+                        )}
+                        {detail.values && detail.values.length > 1 && !detail.warning && (
+                          <div className="mt-2 text-xs text-muted-foreground">
+                            多值: {detail.values.join(', ')}
+                          </div>
+                        )}
                       </div>
                     </div>
                   ))}
