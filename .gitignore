@@ -1,4 +1,5 @@
 /.git/
+/.gitignore
 /.idea/
 /.vscode/
 /backend/venv/
@@ -18,11 +19,7 @@
 /frontend/.idea/
 /frontend/.env
 /frontend/*.log
-/技术路线.md
-/开发路径.md
-/开发日志_2026-03-16.md
-/frontendTest/
-/docs/
+
 /frontend/src/api/
 /frontend/src/api/index.js
 /frontend/src/api/index.ts
@@ -30,9 +27,22 @@
 /frontend/src/api/index.py
 /frontend/src/api/index.go
 /frontend/src/api/index.java
+
+/frontend - 副本/
+
 /docs/
-/frontend - 副本/*
+/frontendTest/
 /supabase.txt
 
-**/__pycache__/*
+# 取消跟踪的文件 / Untracked files
+比赛备赛规划.md
+Q&A.xlsx
+package.json
+技术路线.md
+开发路径.md
+开发日志_2026-03-16.md
+/logs/
+
+# Python cache
+**/__pycache__/**
 **.pyc
