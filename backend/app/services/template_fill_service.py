@@ -13,6 +13,7 @@ from app.services.llm_service import llm_service
 from app.core.document_parser import ParserFactory
 from app.services.markdown_ai_service import markdown_ai_service
 from app.services.rag_service import rag_service
+from app.services.word_ai_service import word_ai_service
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +55,249 @@ class FillResult:
 
 class TemplateFillService:
     """表格填写服务"""
+
+    # 通用表头语义扩展字典
+    GENERIC_HEADER_EXPANSION = {
+        "机构": ["医院", "学校", "企业", "机关", "团体", "协会", "基金会", "研究所", "医院数量", "学校数量", "企业数量"],
+        "名称": ["医院名称", "学校名称", "企业名称", "机构名称", "单位名称", "名称"],
+        "类型": ["医院类型", "学校类型", "企业类型", "机构类型", "类型分类"],
+        "数量": ["医院数量", "学校数量", "企业数量", "机构数量", "个数", "总数", "人员数量"],
+        "金额": ["金额", "收入", "支出", "产值", "销售额", "利润", "税收"],
+        "比率": ["增长率", "占比", "比重", "比率", "百分比", "使用率", "就业率"],
+        "面积": ["占地面积", "建筑面积", "用地面积", "耕地面积", "绿化面积"],
+        "人口": ["常住人口", "户籍人口", "流动人口", "城镇人口", "农村人口"],
+        "价格": ["价格", "物价", "CPI", "涨幅", "指数"],
+        "增长": ["增速", "增长率", "增幅", "增长", "上涨", "下降"],
+    }
+
+    # 模板表头到源文档表头的映射缓存
+    _header_mapping_cache: Dict[str, Dict[str, str]] = {}
+
+    def _analyze_source_table_structure(self, source_docs: List["SourceDocument"]) -> Dict[str, Any]:
+        """
+        分析源文档的表格结构
+
+        Args:
+            source_docs: 源文档列表
+
+        Returns:
+            表格结构分析结果，包含所有表头和样本数据
+        """
+        table_structures = {}
+
+        for doc_idx, doc in enumerate(source_docs):
+            structured = doc.structured_data if doc.structured_data else {}
+
+            # 处理多 sheet 格式
+            if structured.get("sheets"):
+                for sheet_name, sheet_data in structured.get("sheets", {}).items():
+                    if isinstance(sheet_data, dict):
+                        columns = sheet_data.get("columns", [])
+                        rows = sheet_data.get("rows", [])[:10]  # 只取前10行作为样本
+                        key = f"doc{doc_idx}_{sheet_name}"
+                        table_structures[key] = {
+                            "doc_idx": doc_idx,
+                            "sheet_name": sheet_name,
+                            "columns": columns,
+                            "sample_rows": rows,
+                            "column_count": len(columns),
+                            "row_count": len(sheet_data.get("rows", []))
+                        }
+
+            # 处理 tables 格式
+            elif structured.get("tables"):
+                for table_idx, table in enumerate(structured.get("tables", [])[:5]):
+                    if isinstance(table, dict):
+                        headers = table.get("headers", [])
+                        rows = table.get("rows", [])[:10]
+                        key = f"doc{doc_idx}_table{table_idx}"
+                        table_structures[key] = {
+                            "doc_idx": doc_idx,
+                            "table_idx": table_idx,
+                            "columns": headers,
+                            "sample_rows": rows,
+                            "column_count": len(headers),
+                            "row_count": len(table.get("rows", []))
+                        }
+
+            # 处理单 sheet 格式
+            elif structured.get("columns") and structured.get("rows"):
+                columns = structured.get("columns", [])
+                rows = structured.get("rows", [])[:10]
+                key = f"doc{doc_idx}_default"
+                table_structures[key] = {
+                    "doc_idx": doc_idx,
+                    "columns": columns,
+                    "sample_rows": rows,
+                    "column_count": len(columns),
+                    "row_count": len(structured.get("rows", []))
+                }
+
+        logger.info(f"分析源文档表格结构: {len(table_structures)} 个表格")
+        return table_structures
+
+    def _build_adaptive_header_mapping(
+        self,
+        template_fields: List["TemplateField"],
+        source_table_structures: Dict[str, Any]
+    ) -> Dict[str, Dict[str, Any]]:
+        """
+        自适应构建模板表头到源文档表头的映射
+
+        Args:
+            template_fields: 模板字段列表
+            source_table_structures: 源文档表格结构
+
+        Returns:
+            映射字典: {field_name: {source_table_key: {column: idx, match_score: score}}}
+        """
+        mappings = {}
+
+        for field in template_fields:
+            field_name = field.name
+            field_lower = field_name.lower()
+            field_keywords = set(field_lower.replace(" ", "").split())
+
+            best_matches = {}
+
+            for table_key, table_info in source_table_structures.items():
+                columns = table_info.get("columns", [])
+                if not columns:
+                    continue
+
+                best_col_idx = None
+                best_col_name = None
+                best_score = 0
+
+                for col_idx, col in enumerate(columns):
+                    col_str = str(col).strip()
+                    col_lower = col_str.lower()
+                    col_keywords = set(col_lower.replace(" ", "").split())
+
+                    score = 0
+
+                    # 1. 精确匹配
+                    if col_lower == field_lower:
+                        score = 1.0
+                    # 2. 子字符串匹配
+                    elif field_lower in col_lower or col_lower in field_lower:
+                        score = 0.8 * max(len(field_lower), len(col_lower)) / min(len(field_lower) + 1, len(col_lower) + 1)
+                    # 3. 关键词重叠
+                    else:
+                        overlap = field_keywords & col_keywords
+                        if overlap:
+                            score = 0.6 * len(overlap) / max(len(field_keywords), len(col_keywords), 1)
+
+                    # 4. 检查通用表头扩展
+                    if score < 0.5:
+                        for generic, specifics in self.GENERIC_HEADER_EXPANSION.items():
+                            if generic in field_lower:
+                                for specific in specifics:
+                                    if specific in col_lower or col_lower in specific:
+                                        score = 0.7
+                                        break
+                            if score >= 0.5:
+                                break
+
+                    if score > best_score:
+                        best_score = score
+                        best_col_idx = col_idx
+                        best_col_name = col_str
+
+                if best_score >= 0.3 and best_col_idx is not None:
+                    best_matches[table_key] = {
+                        "column_index": best_col_idx,
+                        "column_name": best_col_name,
+                        "match_score": best_score,
+                        "table_info": table_info
+                    }
+
+            if best_matches:
+                mappings[field_name] = best_matches
+                logger.info(f"字段 '{field_name}' 匹配到 {len(best_matches)} 个源表头，最佳匹配: {list(best_matches.values())[0].get('column_name')}")
+
+        return mappings
+
+    def _extract_with_adaptive_mapping(
+        self,
+        source_docs: List["SourceDocument"],
+        field_name: str,
+        mapping: Dict[str, Dict[str, Any]]
+    ) -> List[str]:
+        """
+        使用自适应映射提取字段值
+
+        Args:
+            source_docs: 源文档列表
+            field_name: 字段名
+            mapping: 字段到源表头的映射
+
+        Returns:
+            提取的值列表
+        """
+        values = []
+
+        if field_name not in mapping:
+            return values
+
+        best_matches = mapping[field_name]
+
+        for table_key, match_info in best_matches.items():
+            table_info = match_info.get("table_info", {})
+            col_idx = match_info.get("column_index", 0)
+            doc_idx = table_info.get("doc_idx", 0)
+
+            if doc_idx >= len(source_docs):
+                continue
+
+            doc = source_docs[doc_idx]
+            structured = doc.structured_data if doc.structured_data else {}
+
+            # 根据表格类型提取值
+            rows = []
+
+            # 多 sheet 格式
+            if structured.get("sheets"):
+                sheet_name = table_info.get("sheet_name")
+                if sheet_name:
+                    sheet_data = structured.get("sheets", {}).get(sheet_name, {})
+                    rows = sheet_data.get("rows", [])
+
+            # tables 格式
+            elif structured.get("tables"):
+                table_idx = table_info.get("table_idx", 0)
+                tables = structured.get("tables", [])
+                if table_idx < len(tables):
+                    rows = tables[table_idx].get("rows", [])
+
+            # 单 sheet 格式
+            elif structured.get("rows"):
+                rows = structured.get("rows", [])
+
+            # 提取指定列的值
+            for row in rows:
+                if isinstance(row, list) and col_idx < len(row):
+                    val = self._format_value(row[col_idx])
+                    if val and self._is_valid_data_value(val):
+                        values.append(val)
+                elif isinstance(row, dict):
+                    # 对于 dict 格式的行
+                    columns = table_info.get("columns", [])
+                    if col_idx < len(columns):
+                        col_name = columns[col_idx]
+                        val = self._format_value(row.get(col_name, ""))
+                        if val and self._is_valid_data_value(val):
+                            values.append(val)
+
+        # 过滤和去重
+        seen = set()
+        unique_values = []
+        for v in values:
+            if v not in seen:
+                seen.add(v)
+                unique_values.append(v)
+
+        return unique_values
 
     def __init__(self):
         self.llm = llm_service
@@ -305,6 +549,62 @@ class TemplateFillService:
         if source_file_paths:
             for file_path in source_file_paths:
                 try:
+                    file_ext = file_path.lower().split('.')[-1]
+
+                    # 对于 Word 文档，优先使用 AI 解析
+                    if file_ext == 'docx':
+                        # 使用 AI 深度解析 Word 文档
+                        ai_result = await word_ai_service.parse_word_with_ai(
+                            file_path=file_path,
+                            user_hint="请提取文档中的所有结构化数据，包括表格、键值对等"
+                        )
+
+                        if ai_result.get("success"):
+                            # AI 解析成功，转换为 SourceDocument 格式
+                            parse_type = ai_result.get("type", "unknown")
+
+                            # 构建 structured_data
+                            doc_structured = {
+                                "ai_parsed": True,
+                                "parse_type": parse_type,
+                                "tables": [],
+                                "key_values": ai_result.get("key_values", {}) if "key_values" in ai_result else {},
+                                "list_items": ai_result.get("list_items", []) if "list_items" in ai_result else [],
+                                "summary": ai_result.get("summary", "") if "summary" in ai_result else ""
+                            }
+
+                            # 如果 AI 返回了表格数据
+                            if parse_type == "table_data":
+                                headers = ai_result.get("headers", [])
+                                rows = ai_result.get("rows", [])
+                                if headers and rows:
+                                    doc_structured["tables"] = [{
+                                        "headers": headers,
+                                        "rows": rows
+                                    }]
+                                    doc_structured["columns"] = headers
+                                    doc_structured["rows"] = rows
+                                    logger.info(f"AI 表格数据: {len(headers)} 列, {len(rows)} 行")
+                            elif parse_type == "structured_text":
+                                tables = ai_result.get("tables", [])
+                                if tables:
+                                    doc_structured["tables"] = tables
+                                    logger.info(f"AI 结构化文本提取到 {len(tables)} 个表格")
+
+                            # 获取摘要内容
+                            content_text = doc_structured.get("summary", "") or ai_result.get("description", "")
+
+                            source_docs.append(SourceDocument(
+                                doc_id=file_path,
+                                filename=file_path.split("/")[-1] if "/" in file_path else file_path.split("\\")[-1],
+                                doc_type="docx",
+                                content=content_text,
+                                structured_data=doc_structured
+                            ))
+                            logger.info(f"AI 解析 Word 文档: {file_path}, type={parse_type}, tables={len(doc_structured.get('tables', []))}")
+                            continue  # 跳后续的基础解析
+
+                    # 基础解析（Excel 或非 AI 解析的 Word）
                     parser = ParserFactory.get_parser(file_path)
                     result = parser.parse(file_path)
                     if result.success:
@@ -1351,6 +1651,36 @@ class TemplateFillService:
                 if all_values:
                     break
 
+            # 处理 AI 解析的 Word 文档键值对格式: {key_values: {"键": "值"}, ...}
+            if structured.get("key_values") and isinstance(structured.get("key_values"), dict):
+                key_values = structured.get("key_values", {})
+                logger.info(f"  检测到 AI 解析键值对格式，共 {len(key_values)} 个键值对")
+                values = self._extract_from_key_values(key_values, field_name)
+                if values:
+                    all_values.extend(values)
+                    logger.info(f"从 Word AI 键值对提取到 {len(values)} 个值: {values}")
+                    break
+
+            # 处理 AI 解析的 list_items 格式
+            if structured.get("list_items") and isinstance(structured.get("list_items"), list):
+                list_items = structured.get("list_items", [])
+                logger.info(f"  检测到 AI 解析列表格式，共 {len(list_items)} 个列表项")
+                values = self._extract_from_list_items(list_items, field_name)
+                if values:
+                    all_values.extend(values)
+                    logger.info(f"从 Word AI 列表提取到 {len(values)} 个值")
+                    break
+
+        # 如果从结构化数据中没有提取到值，且字段是通用表头，搜索文本内容
+        if not all_values and field_name in self.GENERIC_HEADER_EXPANSION:
+            for doc in source_docs:
+                if doc.content:
+                    text_values = self._search_generic_header_in_text(doc.content, field_name)
+                    if text_values:
+                        all_values.extend(text_values)
+                        logger.info(f"从文本内容通过通用表头匹配提取到 {len(text_values)} 个值")
+                        break
+
         return all_values
 
     def _extract_values_from_markdown_table(self, headers: List, rows: List, field_name: str) -> List[str]:
@@ -1376,9 +1706,26 @@ class TemplateFillService:
         # 查找匹配的列索引 - 使用增强的匹配算法
         target_idx = self._find_best_matching_column(headers, field_name)
 
-        if target_idx is None:
+        # 如果没有找到列匹配，尝试在第一列中搜索字段名（适用于指标在行的文档）
+        matched_row_idx = None
+        if target_idx is None and rows:
+            matched_row_idx = self._search_row_in_first_column(rows, field_name)
+            if matched_row_idx is not None:
+                logger.info(f"在第一列找到匹配: {field_name} -> 行索引 {matched_row_idx} (转置表格结构)")
+
+        if target_idx is None and matched_row_idx is None:
             logger.warning(f"未找到匹配列: {field_name}, 可用表头: {headers}")
             return []
+
+        # 如果在第一列找到匹配（转置表格），提取该行的其他列作为值
+        if matched_row_idx is not None:
+            matched_row = rows[matched_row_idx]
+            if isinstance(matched_row, list):
+                # 跳过第一列（指标名），提取后续列的值
+                for val in matched_row[1:]:
+                    values.append(self._format_value(val))
+            logger.info(f"转置表格提取到 {len(values)} 个值: {values[:5]}...")
+            return self._filter_valid_values(values)
 
         logger.info(f"列匹配成功: {field_name} -> {headers[target_idx]} (索引: {target_idx})")
 
@@ -1527,6 +1874,149 @@ class TemplateFillService:
                 valid_values.append(val)
         return valid_values
 
+    def _extract_from_key_values(self, key_values: Dict[str, str], field_name: str) -> List[str]:
+        """
+        从键值对字典中提取与字段名匹配的值
+
+        Args:
+            key_values: 键值对字典，如 {"医院数量": "38710个", "床位总数": "456789张"}
+            field_name: 要匹配的字段名
+
+        Returns:
+            匹配的值列表
+        """
+        if not key_values:
+            return []
+
+        field_lower = field_name.lower().strip()
+        field_chars = set(field_lower.replace(" ", ""))
+        field_keywords = set(field_lower.replace(" ", "").split())
+
+        best_match_key = None
+        best_match_score = 0
+
+        for key, value in key_values.items():
+            key_str = str(key).strip()
+            key_lower = key_str.lower()
+            key_chars = set(key_lower.replace(" ", ""))
+
+            if not key_str or not value:
+                continue
+
+            # 策略1: 精确匹配（忽略大小写）
+            if key_lower == field_lower:
+                logger.info(f"键值对精确匹配: {field_name} -> {key_str}: {value}")
+                return [str(value)]
+
+            # 策略2: 子字符串匹配
+            if field_lower in key_lower or key_lower in field_lower:
+                score = max(len(field_lower), len(key_lower)) / min(len(field_lower) + 1, len(key_lower) + 1)
+                if score > best_match_score:
+                    best_match_score = score
+                    best_match_key = (key_str, value)
+
+            # 策略3: 关键词重叠匹配（适用于中文）
+            key_keywords = set(key_lower.replace(" ", "").split())
+            overlap = field_keywords & key_keywords
+            if overlap and len(overlap) > 0:
+                score = len(overlap) / max(len(field_keywords), len(key_keywords), 1)
+                if score > best_match_score:
+                    best_match_score = score
+                    best_match_key = (key_str, value)
+
+            # 策略4: 字符级包含匹配（适用于中文短字段）
+            char_overlap = field_chars & key_chars
+            if char_overlap:
+                char_score = len(char_overlap) / max(len(field_chars), len(key_chars), 1)
+                # 对于短字段（<=4字符），降低要求
+                if len(field_chars) <= 4 and char_score >= 0.5:
+                    if char_score > best_match_score:
+                        best_match_score = char_score
+                        best_match_key = (key_str, value)
+                elif char_score > best_match_score and len(char_overlap) >= 2:
+                    best_match_score = char_score
+                    best_match_key = (key_str, value)
+
+        # 降低阈值到 0.2，允许更多模糊匹配
+        if best_match_score >= 0.2 and best_match_key:
+            logger.info(f"键值对模糊匹配: {field_name} -> {best_match_key[0]}: {best_match_key[1]} (分数: {best_match_score:.2f})")
+            return [str(best_match_key[1])]
+
+        logger.warning(f"键值对未匹配到: {field_name}, 可用键: {list(key_values.keys())}")
+        return []
+
+    def _extract_from_list_items(self, list_items: List[str], field_name: str) -> List[str]:
+        """
+        从列表项中提取与字段名匹配的值
+
+        Args:
+            list_items: 列表项，如 ["医院数量: 38710个", "床位总数: 456789张", ...]
+            field_name: 要匹配的字段名
+
+        Returns:
+            匹配的值列表
+        """
+        if not list_items:
+            return []
+
+        field_lower = field_name.lower().strip()
+        field_keywords = set(field_lower.replace(" ", "").split())
+
+        matched_values = []
+
+        for item in list_items:
+            item_str = str(item).strip()
+            if not item_str:
+                continue
+
+            item_lower = item_str.lower()
+
+            # 策略1: 检查列表项是否以字段名开头（格式如 "医院数量: 38710个"）
+            if ':' in item_str or '：' in item_str:
+                parts = item_str.replace('：', ':').split(':', 1)
+                if len(parts) == 2:
+                    key = parts[0].strip()
+                    value = parts[1].strip()
+                    key_lower = key.lower()
+
+                    # 精确匹配键
+                    if key_lower == field_lower:
+                        logger.info(f"列表项键值精确匹配: {field_name} -> {value}")
+                        return [value]
+
+                    # 子字符串匹配
+                    if field_lower in key_lower or key_lower in field_lower:
+                        score = max(len(field_lower), len(key_lower)) / min(len(field_lower) + 1, len(key_lower) + 1)
+                        if score >= 0.2:
+                            logger.info(f"列表项键值模糊匹配: {field_name} -> {key}: {value} (分数: {score:.2f})")
+                            matched_values.append(value)
+
+                    # 关键词重叠
+                    key_keywords = set(key_lower.replace(" ", "").split())
+                    overlap = field_keywords & key_keywords
+                    if overlap:
+                        score = len(overlap) / max(len(field_keywords), len(key_keywords), 1)
+                        if score >= 0.2:
+                            matched_values.append(value)
+
+            # 策略2: 直接匹配整个列表项
+            if field_lower in item_lower or item_lower in field_lower:
+                matched_values.append(item_str)
+                continue
+
+            # 策略3: 关键词重叠
+            item_keywords = set(item_lower.replace(" ", "").split())
+            overlap = field_keywords & item_keywords
+            if overlap and len(overlap) >= 2:  # 至少2个关键词重叠
+                score = len(overlap) / max(len(field_keywords), len(item_keywords), 1)
+                if score >= 0.2:
+                    matched_values.append(item_str)
+
+        if matched_values:
+            logger.info(f"列表项匹配到 {len(matched_values)} 个: {matched_values[:5]}")
+
+        return matched_values
+
     def _find_best_matching_column(self, headers: List, field_name: str) -> Optional[int]:
         """
         查找最佳匹配的列索引
@@ -1535,6 +2025,7 @@ class TemplateFillService:
         1. 精确匹配（忽略大小写）
         2. 子字符串匹配（字段名在表头中，或表头在字段名中）
         3. 关键词重叠匹配（中文字符串分割后比对）
+        4. 字符级包含匹配（适用于中文短字段）
 
         Args:
             headers: 表头列表
@@ -1544,6 +2035,8 @@ class TemplateFillService:
             匹配的列索引，找不到返回 None
         """
         field_lower = field_name.lower().strip()
+        # 对中文进行字符级拆分，增加匹配的灵活性
+        field_chars = set(field_lower.replace(" ", ""))
         field_keywords = set(field_lower.replace(" ", "").split())
 
         best_match_idx = None
@@ -1560,6 +2053,7 @@ class TemplateFillService:
 
             # 策略1: 精确匹配（忽略大小写）
             if header_lower == field_lower:
+                logger.info(f"精确匹配: {field_name} -> {header_str}")
                 return idx
 
             # 策略2: 子字符串匹配
@@ -1580,10 +2074,90 @@ class TemplateFillService:
                     best_match_score = score
                     best_match_idx = idx
 
-        # 只有当匹配分数超过阈值时才返回
-        if best_match_score >= 0.3:
+            # 策略4: 字符级包含匹配（适用于中文短字段，如"医院"匹配"医院数量"）
+            header_chars = set(header_lower.replace(" ", ""))
+            char_overlap = field_chars & header_chars
+            if char_overlap:
+                # 计算字符重叠率，但要求至少有一定数量的重叠字符
+                char_score = len(char_overlap) / max(len(field_chars), len(header_chars), 1)
+                # 对于短字段（<=4字符），降低要求，只要有重叠且字符score较高即可
+                if len(field_chars) <= 4 and char_score >= 0.5:
+                    if char_score > best_match_score:
+                        best_match_score = char_score
+                        best_match_idx = idx
+                elif char_score > best_match_score and len(char_overlap) >= 2:
+                    # 对于较长字段，要求至少2个字符重叠
+                    best_match_score = char_score
+                    best_match_idx = idx
+
+        # 降低阈值到 0.2，允许更多模糊匹配
+        if best_match_score >= 0.2:
             logger.info(f"模糊匹配: {field_name} -> {headers[best_match_idx]} (分数: {best_match_score:.2f})")
             return best_match_idx
+
+        return None
+
+    def _search_row_in_first_column(self, rows: List, field_name: str) -> Optional[int]:
+        """
+        在表格第一列中搜索字段名（适用于指标在行的转置表格结构）
+
+        对于某些中文统计文档，表格结构是转置的：
+        - 第一列是指标名称（如"医院数量"）
+        - 其他列是年份或数值
+
+        Args:
+            rows: 数据行列表
+            field_name: 要搜索的字段名
+
+        Returns:
+            匹配的列索引（始终返回0，因为是第一列），如果没找到返回None
+        """
+        if not rows or not field_name:
+            return None
+
+        field_lower = field_name.lower().strip()
+        field_chars = set(field_lower.replace(" ", ""))
+        field_keywords = set(field_lower.replace(" ", "").split())
+
+        for row_idx, row in enumerate(rows):
+            if not isinstance(row, list) or len(row) == 0:
+                continue
+
+            first_cell = str(row[0]).strip()
+            if not first_cell:
+                continue
+
+            first_cell_lower = first_cell.lower()
+
+            # 精确匹配
+            if first_cell_lower == field_lower:
+                logger.info(f"第一列精确匹配字段: {field_name} -> {first_cell} (行{row_idx})")
+                return 0
+
+            # 子字符串匹配
+            if field_lower in first_cell_lower or first_cell_lower in field_lower:
+                score = max(len(field_lower), len(first_cell_lower)) / min(len(field_lower) + 1, len(first_cell_lower) + 1)
+                if score >= 0.5:
+                    logger.info(f"第一列模糊匹配字段: {field_name} -> {first_cell} (行{row_idx}, 分数:{score:.2f})")
+                    return 0
+
+            # 关键词重叠匹配
+            first_keywords = set(first_cell_lower.replace(" ", "").split())
+            overlap = field_keywords & first_keywords
+            if overlap and len(overlap) >= 2:
+                score = len(overlap) / max(len(field_keywords), len(first_keywords), 1)
+                if score >= 0.3:
+                    logger.info(f"第一列关键词匹配: {field_name} -> {first_cell} (行{row_idx}, 分数:{score:.2f})")
+                    return 0
+
+            # 字符级匹配（短字段）
+            first_chars = set(first_cell_lower.replace(" ", ""))
+            char_overlap = field_chars & first_chars
+            if char_overlap and len(field_chars) <= 4:
+                char_score = len(char_overlap) / max(len(field_chars), len(first_chars), 1)
+                if char_score >= 0.5:
+                    logger.info(f"第一列字符匹配: {field_name} -> {first_cell} (行{row_idx}, 分数:{char_score:.2f})")
+                    return 0
 
         return None
 
@@ -1676,6 +2250,55 @@ class TemplateFillService:
                 return str(val)
 
         return str(val)
+
+    def _search_generic_header_in_text(self, text: str, field_name: str) -> List[str]:
+        """
+        从文本中搜索通用表头对应的具体值
+
+        例如：表头"机构" -> 搜索文本中的"医院"、"学校"、"企业"等
+
+        Args:
+            text: 文档文本内容
+            field_name: 字段名称（可能是通用表头）
+
+        Returns:
+            匹配到的值列表
+        """
+        import re
+
+        # 检查是否是通用表头
+        generic_terms = self.GENERIC_HEADER_EXPANSION.get(field_name, [])
+        if not generic_terms:
+            return []
+
+        matched_values = []
+
+        for term in generic_terms:
+            # 搜索 term + 数字/量词 的模式，如 "医院 100所"
+            patterns = [
+                rf'{re.escape(term)}[\s\d所个家级人万元亿元%‰]+',  # 医院100所, 企业50家
+                rf'{re.escape(term)}[：:\s]+(\d+[\d。,，]?\d*)',   # 医院：100
+                rf'(\d+[\d。,，]?\d*)[^\d]*{re.escape(term)}',    # 100家医院
+            ]
+            for pattern in patterns:
+                matches = re.findall(pattern, text, re.IGNORECASE)
+                for match in matches:
+                    val = match.strip() if isinstance(match, str) else match
+                    if val and len(str(val)) < 100:
+                        matched_values.append(str(val))
+
+        # 去重并保持顺序
+        seen = set()
+        unique_values = []
+        for v in matched_values:
+            if v not in seen:
+                seen.add(v)
+                unique_values.append(v)
+
+        if unique_values:
+            logger.info(f"通用表头 '{field_name}' 匹配到值: {unique_values[:10]}")
+
+        return unique_values
 
     def _extract_values_from_json(self, result) -> List[str]:
         """
@@ -2236,29 +2859,32 @@ class TemplateFillService:
    - 二级分类：如"医院"下分为"公立医院"、"民营医院"
 
 4. **生成字段**：
-   - 字段名要简洁，如："医院数量"、"病床使用率"
-   - 优先选择：总数 + 主要分类
+   - 字段名要详细具体，能区分不同数据，如："医院数量（个）"、"病床使用率（%）"、"公立医院数量"
+   - 优先选择：总数 + 主要分类 + 重要指标
 
 5. **生成数量**：
-   - 生成5-7个最有代表性的字段
+   - 生成10-15个最有代表性的字段，确保覆盖主要数据指标
+
+6. **添加字段说明**：
+   - 每个字段可以添加 hint 说明字段的含义和数据来源
 
 请严格按照以下 JSON 格式输出（只需输出 JSON，不要其他内容）：
 {{
     "fields": [
-        {{"name": "字段名1"}},
-        {{"name": "字段名2"}}
+        {{"name": "医院数量", "hint": "从文档中提取医院总数，包括公立和民营医院"}},
+        {{"name": "病床使用率", "hint": "提取病床使用率数据"}}
     ]
 }}
 """
             messages = [
-                {"role": "system", "content": "你是一个专业的表格设计助手。请严格按JSON格式输出，只返回纯数据字段名，不要source、备注、说明等辅助字段。"},
+                {"role": "system", "content": "你是一个专业的表格设计助手。请严格按JSON格式输出，为每个字段生成详细名称和hint说明。"},
                 {"role": "user", "content": prompt}
             ]
 
             response = await self.llm.chat(
                 messages=messages,
                 temperature=0.3,
-                max_tokens=2000
+                max_tokens=4000
             )
 
             content = self.llm.extract_message_content(response)

@@ -1,15 +1,14 @@
 """
 指令执行模块
 
-注意: 此模块为可选功能，当前尚未实现。
-如需启用，请实现 intent_parser.py 和 executor.py
+支持文档智能操作交互，包括意图解析和指令执行
 """
-from .intent_parser import IntentParser, DefaultIntentParser
-from .executor import InstructionExecutor, DefaultInstructionExecutor
+from .intent_parser import IntentParser, intent_parser
+from .executor import InstructionExecutor, instruction_executor
 
 __all__ = [
     "IntentParser",
-    "DefaultIntentParser",
+    "intent_parser",
     "InstructionExecutor",
-    "DefaultInstructionExecutor",
+    "instruction_executor",
 ]

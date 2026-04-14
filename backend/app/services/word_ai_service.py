@@ -192,13 +192,15 @@ class WordAIService:
             result = self._parse_json_response(content)
 
             if result:
-                logger.info(f"AI 表格提取成功: {len(result.get('rows', []))} 行数据")
+                logger.info(f"AI 表格提取成功: {len(result.get('rows', []))} 行数据, key_values={len(result.get('key_values', {}))}, list_items={len(result.get('list_items', []))}")
                 return {
                     "success": True,
                     "type": "table_data",
                     "headers": result.get("headers", []),
                     "rows": result.get("rows", []),
-                    "description": result.get("description", "")
+                    "description": result.get("description", ""),
+                    "key_values": result.get("key_values", {}),
+                    "list_items": result.get("list_items", [])
                 }
             else:
                 # 如果 AI 返回格式不对，尝试直接解析表格

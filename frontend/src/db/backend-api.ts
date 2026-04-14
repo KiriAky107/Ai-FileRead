@@ -1459,4 +1459,131 @@ export const aiApi = {
       throw error;
     }
   },
+
+  // ==================== 智能指令 ====================
+
+  /**
+   * 识别自然语言指令的意图
+   */
+  async recognizeIntent(
+    instruction: string,
+    docIds?: string[]
+  ): Promise<{
+    success: boolean;
+    intent: string;
+    params: Record<string, any>;
+    message: string;
+  }> {
+    const url = `${BACKEND_BASE_URL}/instruction/recognize`;
+
+    try {
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ instruction, doc_ids: docIds }),
+      });
+
+      if (!response.ok) {
+        const error = await response.json();
+        throw new Error(error.detail || '意图识别失败');
+      }
+
+      return await response.json();
+    } catch (error) {
+      console.error('意图识别失败:', error);
+      throw error;
+    }
+  },
+
+  /**
+   * 执行自然语言指令
+   */
+  async executeInstruction(
+    instruction: string,
+    docIds?: string[],
+    context?: Record<string, any>
+  ): Promise<{
+    success: boolean;
+    intent: string;
+    result: Record<string, any>;
+    message: string;
+  }> {
+    const url = `${BACKEND_BASE_URL}/instruction/execute`;
+
+    try {
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ instruction, doc_ids: docIds, context }),
+      });
+
+      if (!response.ok) {
+        const error = await response.json();
+        throw new Error(error.detail || '指令执行失败');
+      }
+
+      return await response.json();
+    } catch (error) {
+      console.error('指令执行失败:', error);
+      throw error;
+    }
+  },
+
+  /**
+   * 智能对话（支持多轮对话的指令执行）
+   */
+  async instructionChat(
+    instruction: string,
+    docIds?: string[],
+    context?: Record<string, any>
+  ): Promise<{
+    success: boolean;
+    intent: string;
+    result: Record<string, any>;
+    message: string;
+    hint?: string;
+  }> {
+    const url = `${BACKEND_BASE_URL}/instruction/chat`;
+
+    try {
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ instruction, doc_ids: docIds, context }),
+      });
+
+      if (!response.ok) {
+        const error = await response.json();
+        throw new Error(error.detail || '对话处理失败');
+      }
+
+      return await response.json();
+    } catch (error) {
+      console.error('对话处理失败:', error);
+      throw error;
+    }
+  },
+
+  /**
+   * 获取支持的指令类型列表
+   */
+  async getSupportedIntents(): Promise<{
+    intents: Array<{
+      intent: string;
+      name: string;
+      examples: string[];
+      params: string[];
+    }>;
+  }> {
+    const url = `${BACKEND_BASE_URL}/instruction/intents`;
+
+    try {
+      const response = await fetch(url);
+      if (!response.ok) throw new Error('获取指令列表失败');
+      return await response.json();
+    } catch (error) {
+      console.error('获取指令列表失败:', error);
+      throw error;
+    }
+  },
 };

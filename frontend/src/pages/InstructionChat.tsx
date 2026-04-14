@@ -10,7 +10,11 @@ import {
   TableProperties,
   ChevronRight,
   ArrowRight,
-  Loader2
+  Loader2,
+  Download,
+  Search,
+  MessageSquare,
+  CheckCircle
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -26,12 +30,15 @@ type ChatMessage = {
   role: 'user' | 'assistant';
   content: string;
   created_at: string;
+  intent?: string;
+  result?: any;
 };
 
 const InstructionChat: React.FC = () => {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
+  const [currentDocIds, setCurrentDocIds] = useState<string[]>([]);
   const scrollAreaRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -43,26 +50,46 @@ const InstructionChat: React.FC = () => {
           role: 'assistant',
           content: `您好！我是智联文档 AI 助手。
 
-我可以帮您完成以下操作：
+**📄 文档智能操作**
+- "提取文档中的医院数量和床位数"
+- "帮我找出所有机构的名称"
 
-📄 **文档管理**
-- "帮我列出最近上传的所有文档"
-- "删除三天前的 docx 文档"
+**📊 数据填表**
+- "根据这些数据填表"
+- "将提取的信息填写到Excel模板"
 
-📊 **Excel 分析**
-- "分析一下最近上传的 Excel 文件"
-- "帮我统计销售报表中的数据"
+**📝 内容处理**
+- "总结一下这份文档"
+- "对比这两个文档的差异"
 
-📝 **智能填表**
-- "根据员工信息表创建一个考勤汇总表"
-- "用财务文档填充报销模板"
+**🔍 智能问答**
+- "文档里说了些什么？"
+- "有多少家医院？"
 
 请告诉我您想做什么？`,
           created_at: new Date().toISOString()
         }
       ]);
+
+      // 获取已上传的文档ID列表
+      loadDocuments();
     }
   }, []);
+
+  const loadDocuments = async () => {
+    try {
+      const result = await backendApi.getDocuments(undefined, 50);
+      if (result.success && result.documents) {
+        const docIds = result.documents.map((d: any) => d.doc_id);
+        setCurrentDocIds(docIds);
+        if (docIds.length > 0) {
+          console.log(`已加载 ${docIds.length} 个文档`);
+        }
+      }
+    } catch (err) {
+      console.error('获取文档列表失败:', err);
+    }
+  };
 
   useEffect(() => {
     // Scroll to bottom
@@ -89,95 +116,126 @@ const InstructionChat: React.FC = () => {
     setLoading(true);
 
     try {
-      // TODO: 后端对话接口，暂用模拟响应
-      await new Promise(resolve => setTimeout(resolve, 1500));
+      // 使用真实的智能指令 API
+      const response = await backendApi.instructionChat(
+        input.trim(),
+        currentDocIds.length > 0 ? currentDocIds : undefined
+      );
 
-      // 简单的命令解析演示
-      const userInput = userMessage.content.toLowerCase();
-      let response = '';
+      // 根据意图类型生成友好响应
+      let responseContent = '';
+      const resultData = response.result;
 
-      if (userInput.includes('列出') || userInput.includes('列表')) {
-        const result = await backendApi.getDocuments(undefined, 10);
-        if (result.success && result.documents && result.documents.length > 0) {
-          response = `已为您找到 ${result.documents.length} 个文档：\n\n`;
-          result.documents.slice(0, 5).forEach((doc: any, idx: number) => {
-            response += `${idx + 1}. **${doc.original_filename}** (${doc.doc_type.toUpperCase()})\n`;
-            response += `   - 大小: ${(doc.file_size / 1024).toFixed(1)} KB\n`;
-            response += `   - 时间: ${new Date(doc.created_at).toLocaleDateString()}\n\n`;
-          });
-          if (result.documents.length > 5) {
-            response += `...还有 ${result.documents.length - 5} 个文档`;
+      switch (response.intent) {
+        case 'extract':
+          // 信息提取结果
+          const extracted = resultData?.extracted_data || {};
+          const keys = Object.keys(extracted);
+          if (keys.length > 0) {
+            responseContent = `✅ 已提取到 ${keys.length} 个字段的数据：\n\n`;
+            for (const [key, value] of Object.entries(extracted)) {
+              const values = Array.isArray(value) ? value : [value];
+              responseContent += `**${key}**: ${values.slice(0, 3).join(', ')}${values.length > 3 ? '...' : ''}\n`;
+            }
+            responseContent += `\n💡 您可以将这些数据填入表格。`;
+          } else {
+            responseContent = '未能从文档中提取到相关数据。请尝试更明确的字段名称。';
           }
-        } else {
-          response = '暂未找到已上传的文档，您可以先上传一些文档试试。';
-        }
-      } else if (userInput.includes('分析') || userInput.includes('excel') || userInput.includes('报表')) {
-        response = `好的，我可以帮您分析 Excel 文件。
+          break;
 
-请告诉我：
-1. 您想分析哪个 Excel 文件？
-2. 需要什么样的分析？（数据摘要/统计分析/图表生成）
+        case 'fill_table':
+          // 填表结果
+          const filled = resultData?.result?.filled_data || {};
+          const filledKeys = Object.keys(filled);
+          if (filledKeys.length > 0) {
+            responseContent = `✅ 填表完成！成功填写 ${filledKeys.length} 个字段：\n\n`;
+            for (const [key, value] of Object.entries(filled)) {
+              const values = Array.isArray(value) ? value : [value];
+              responseContent += `**${key}**: ${values.slice(0, 3).join(', ')}\n`;
+            }
+            responseContent += `\n📋 请到【智能填表】页面查看或导出结果。`;
+          } else {
+            responseContent = '填表未能提取到数据。请检查模板表头和数据源内容。';
+          }
+          break;
 
-或者您可以直接告诉我您想从数据中了解什么，我来为您生成分析。`;
-      } else if (userInput.includes('填表') || userInput.includes('模板')) {
-        response = `好的，要进行智能填表，我需要：
+        case 'summarize':
+          // 摘要结果
+          const summaries = resultData?.summaries || [];
+          if (summaries.length > 0) {
+            responseContent = `📄 找到 ${summaries.length} 个文档的摘要：\n\n`;
+            summaries.forEach((s: any, idx: number) => {
+              responseContent += `**${idx + 1}. ${s.filename}**\n${s.content_preview}\n\n`;
+            });
+          } else {
+            responseContent = '未能生成摘要。请确保已上传文档。';
+          }
+          break;
 
-1. **上传表格模板** - 您要填写的表格模板文件（Excel 或 Word 格式）
-2. **选择数据源** - 包含要填写内容的源文档
+        case 'question':
+          // 问答结果
+          if (resultData?.answer) {
+            responseContent = `**问题**: ${resultData.question}\n\n**答案**: ${resultData.answer}`;
+          } else {
+            responseContent = resultData?.message || '我找到了相关信息，请查看上文。';
+          }
+          break;
 
-您可以去【智能填表】页面完成这些操作，或者告诉我您具体想填什么类型的表格，我来指导您操作。`;
-      } else if (userInput.includes('删除')) {
-        response = `要删除文档，请告诉我：
+        case 'search':
+          // 搜索结果
+          const searchResults = resultData?.results || [];
+          if (searchResults.length > 0) {
+            responseContent = `🔍 找到 ${searchResults.length} 条相关内容：\n\n`;
+            searchResults.slice(0, 5).forEach((r: any, idx: number) => {
+              responseContent += `**${idx + 1}.** ${r.content?.substring(0, 100)}...\n\n`;
+            });
+          } else {
+            responseContent = '未找到相关内容。请尝试其他关键词。';
+          }
+          break;
 
-- 要删除的文件名是什么？
-- 或者您可以到【文档中心】页面手动选择并删除文档
+        case 'compare':
+          // 对比结果
+          const comparison = resultData?.comparison || [];
+          if (comparison.length > 0) {
+            responseContent = `📊 对比了 ${comparison.length} 个文档：\n\n`;
+            comparison.forEach((c: any) => {
+              responseContent += `- **${c.filename}**: ${c.doc_type}, ${c.content_length} 字\n`;
+            });
+          } else {
+            responseContent = '需要至少2个文档才能进行对比。';
+          }
+          break;
 
-⚠️ 删除操作不可恢复，请确认后再操作。`;
-      } else if (userInput.includes('帮助') || userInput.includes('help')) {
-        response = `**我可以帮您完成以下操作：**
+        case 'unknown':
+          responseContent = `我理解您想要： "${input.trim()}"\n\n但我目前无法完成此操作。您可以尝试：\n\n1. **提取数据**: "提取医院数量和床位数"\n2. **填表**: "根据这些数据填表"\n3. **总结**: "总结这份文档"\n4. **问答**: "文档里说了什么？"\n5. **搜索**: "搜索相关内容"`;
+          break;
 
-📄 **文档管理**
-- 列出/搜索已上传的文档
-- 查看文档详情和元数据
-- 删除不需要的文档
-
-📊 **Excel 处理**
-- 分析 Excel 文件内容
-- 生成数据统计和图表
-- 导出处理后的数据
-
-📝 **智能填表**
-- 上传表格模板
-- 从文档中提取信息填入模板
-- 导出填写完成的表格
-
-📋 **任务历史**
-- 查看历史处理任务
-- 重新执行或导出结果
-
-请直接告诉我您想做什么！`;
-      } else {
-        response = `我理解您想要： "${input.trim()}"
-
-目前我还在学习如何更好地理解您的需求。您可以尝试：
-
-1. **上传文档** - 去【文档中心】上传 docx/md/txt 文件
-2. **分析 Excel** - 去【Excel解析】上传并分析 Excel 文件
-3. **智能填表** - 去【智能填表】创建填表任务
-
-或者您可以更具体地描述您想做的事情，我会尽力帮助您！`;
+        default:
+          responseContent = response.message || resultData?.message || '已完成您的请求。';
       }
 
       const assistantMessage: ChatMessage = {
         id: Math.random().toString(36).substring(7),
         role: 'assistant',
-        content: response,
-        created_at: new Date().toISOString()
+        content: responseContent,
+        created_at: new Date().toISOString(),
+        intent: response.intent,
+        result: resultData
       };
 
       setMessages(prev => [...prev, assistantMessage]);
     } catch (err: any) {
-      toast.error('请求失败，请重试');
+      console.error('指令执行失败:', err);
+      toast.error(err.message || '请求失败，请重试');
+
+      const errorMessage: ChatMessage = {
+        id: Math.random().toString(36).substring(7),
+        role: 'assistant',
+        content: `抱歉，处理您的请求时遇到了问题：${err.message}\n\n请稍后重试，或尝试更简单的指令。`,
+        created_at: new Date().toISOString()
+      };
+      setMessages(prev => [...prev, errorMessage]);
     } finally {
       setLoading(false);
     }
@@ -189,10 +247,10 @@ const InstructionChat: React.FC = () => {
   };
 
   const quickActions = [
-    { label: '列出所有文档', icon: FileText, action: () => setInput('列出所有已上传的文档') },
-    { label: '分析 Excel 数据', icon: TableProperties, action: () => setInput('分析一下 Excel 文件') },
-    { label: '智能填表', icon: Sparkles, action: () => setInput('我想进行智能填表') },
-    { label: '帮助', icon: Sparkles, action: () => setInput('帮助') }
+    { label: '提取医院数量', icon: Search, action: () => setInput('提取文档中的医院数量和床位数') },
+    { label: '智能填表', icon: TableProperties, action: () => setInput('根据这些数据填表') },
+    { label: '总结文档', icon: MessageSquare, action: () => setInput('总结一下这份文档') },
+    { label: '智能问答', icon: Bot, action: () => setInput('文档里说了些什么？') }
   ];
 
   return (

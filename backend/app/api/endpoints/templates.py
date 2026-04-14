@@ -610,51 +610,79 @@ async def _export_to_excel(filled_data: dict, template_id: str) -> StreamingResp
 
 async def _export_to_word(filled_data: dict, template_id: str) -> StreamingResponse:
     """导出为 Word 格式"""
+    import re
+    import tempfile
+    import os
     from docx import Document
     from docx.shared import Pt, RGBColor
     from docx.enum.text import WD_ALIGN_PARAGRAPH
 
-    doc = Document()
+    def clean_text(text: str) -> str:
+        """清理文本，移除可能导致Word问题的非法字符"""
+        if not text:
+            return ""
+        # 移除控制字符
+        text = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]', '', text)
+        return text.strip()
 
-    # 添加标题
-    title = doc.add_heading('填写结果', level=1)
-    title.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    try:
+        # 先保存到临时文件，再读取到内存，确保文档完整性
+        with tempfile.NamedTemporaryFile(delete=False, suffix='.docx') as tmp_file:
+            tmp_path = tmp_file.name
 
-    # 添加填写时间和模板信息
-    from datetime import datetime
-    info_para = doc.add_paragraph()
-    info_para.add_run(f"模板ID: {template_id}\n").bold = True
-    info_para.add_run(f"导出时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        doc = Document()
+        doc.add_heading('填写结果', level=1)
 
-    doc.add_paragraph()  # 空行
+        from datetime import datetime
+        info_para = doc.add_paragraph()
+        template_filename = template_id.split('/')[-1].split('\\')[-1] if template_id else '未知'
+        info_para.add_run(f"模板文件: {clean_text(template_filename)}\n").bold = True
+        info_para.add_run(f"导出时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        doc.add_paragraph()
 
-    # 添加字段表格
-    table = doc.add_table(rows=1, cols=3)
-    table.style = 'Light Grid Accent 1'
+        table = doc.add_table(rows=1, cols=3)
+        table.style = 'Table Grid'
 
-    # 表头
-    header_cells = table.rows[0].cells
-    header_cells[0].text = '字段名'
-    header_cells[1].text = '填写值'
-    header_cells[2].text = '状态'
+        header_cells = table.rows[0].cells
+        header_cells[0].text = '字段名'
+        header_cells[1].text = '填写值'
+        header_cells[2].text = '状态'
 
-    for field_name, field_value in filled_data.items():
-        row_cells = table.add_row().cells
-        row_cells[0].text = field_name
-        row_cells[1].text = str(field_value) if field_value else ''
-        row_cells[2].text = '已填写' if field_value else '为空'
+        for field_name, field_value in filled_data.items():
+            row_cells = table.add_row().cells
+            row_cells[0].text = clean_text(str(field_name))
 
-    # 保存到 BytesIO
-    output = io.BytesIO()
-    doc.save(output)
-    output.seek(0)
+            if isinstance(field_value, list):
+                clean_values = [clean_text(str(v)) for v in field_value if v]
+                display_value = ', '.join(clean_values) if clean_values else ''
+            else:
+                display_value = clean_text(str(field_value)) if field_value else ''
 
-    filename = f"filled_template.docx"
+            row_cells[1].text = display_value
+            row_cells[2].text = '已填写' if display_value else '为空'
+
+        # 保存到临时文件
+        doc.save(tmp_path)
+
+        # 读取文件内容
+        with open(tmp_path, 'rb') as f:
+            file_content = f.read()
+
+    finally:
+        # 清理临时文件
+        if os.path.exists(tmp_path):
+            try:
+                os.unlink(tmp_path)
+            except:
+                pass
+
+    output = io.BytesIO(file_content)
+    filename = "filled_template.docx"
 
     return StreamingResponse(
-        io.BytesIO(output.getvalue()),
+        output,
         media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        headers={"Content-Disposition": f"attachment; filename={filename}"}
+        headers={"Content-Disposition": f"attachment; filename*=UTF-8''{filename}"}
     )
 
 

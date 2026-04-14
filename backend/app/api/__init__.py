@@ -13,6 +13,7 @@ from app.api.endpoints import (
     visualization,
     analysis_charts,
     health,
+    instruction,    # 智能指令
 )
 
 # 创建主路由
@@ -29,3 +30,4 @@ api_router.include_router(templates.router)        # 表格模板
 api_router.include_router(ai_analyze.router)       # AI分析
 api_router.include_router(visualization.router)    # 可视化
 api_router.include_router(analysis_charts.router)  # 分析图表
+api_router.include_router(instruction.router)      # 智能指令
