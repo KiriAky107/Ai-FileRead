@@ -248,15 +248,25 @@ const TemplateFill: React.FC = () => {
     if (!templateFile || !filledResult) return;
 
     try {
+      const ext = templateFile.name.split('.').pop()?.toLowerCase();
+      const exportFormat = (ext === 'docx') ? 'docx' : 'xlsx';
+      // 对于 Word 模板，如果已有填写后的文件（已填入表格单元格），传递其路径以便直接下载
+      const filledFilePath = (ext === 'docx' && filledResult.filled_file_path)
+        ? filledResult.filled_file_path
+        : undefined;
       const blob = await backendApi.exportFilledTemplate(
         templateId || 'temp',
         filledResult.filled_data || {},
-        'xlsx'
+        exportFormat,
+        filledFilePath
       );
+      const ext_match = templateFile.name.match(/\.([^.])+$/);
+      const baseName = ext_match ? templateFile.name.replace(ext_match[0], '') : templateFile.name;
+      const downloadName = `filled_${baseName}.${exportFormat}`;
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
-      a.download = `filled_${templateFile.name}`;
+      a.download = downloadName;
       a.click();
       URL.revokeObjectURL(url);
       toast.success('导出成功');
@@ -546,7 +556,7 @@ const TemplateFill: React.FC = () => {
             </div>
             <h3 className="text-xl font-bold mb-2">AI 正在智能分析并填表</h3>
             <p className="text-muted-foreground text-center max-w-md">
-              系统正在从 {sourceFiles.length || sourceFilePaths.length} 份文档中检索相关信息...
+              系统正在从 {sourceFiles.length || sourceFilePaths.length || sourceDocIds.length || 0} 份文档中检索相关信息...
             </p>
           </CardContent>
         </Card>
@@ -562,7 +572,7 @@ const TemplateFill: React.FC = () => {
                 填表完成
               </CardTitle>
               <CardDescription>
-                系统已根据 {sourceFiles.length || sourceFilePaths.length} 份文档自动完成表格填写
+                系统已根据 {filledResult.source_doc_count || sourceFiles.length || sourceFilePaths.length || sourceDocIds.length} 份文档自动完成表格填写
               </CardDescription>
             </CardHeader>
             <CardContent>

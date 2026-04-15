@@ -64,6 +64,11 @@ class MongoDB:
         """任务集合 - 存储任务历史记录"""
         return self.db["tasks"]
 
+    @property
+    def conversations(self):
+        """对话集合 - 存储对话历史记录"""
+        return self.db["conversations"]
+
     # ==================== 文档操作 ====================
 
     async def insert_document(
@@ -117,14 +122,20 @@ class MongoDB:
         搜索文档
 
         Args:
-            query: 搜索关键词
+            query: 搜索关键词（支持文件名和内容搜索）
             doc_type: 文档类型过滤
             limit: 返回数量
 
         Returns:
             文档列表
         """
-        filter_query = {"content": {"$regex": query}}
+        filter_query = {
+            "$or": [
+                {"content": {"$regex": query, "$options": "i"}},
+                {"metadata.original_filename": {"$regex": query, "$options": "i"}},
+                {"metadata.filename": {"$regex": query, "$options": "i"}},
+            ]
+        }
         if doc_type:
             filter_query["doc_type"] = doc_type
 
@@ -140,6 +151,15 @@ class MongoDB:
         from bson import ObjectId
         result = await self.documents.delete_one({"_id": ObjectId(doc_id)})
         return result.deleted_count > 0
+
+    async def update_document_metadata(self, doc_id: str, metadata: Dict[str, Any]) -> bool:
+        """更新文档 metadata 字段"""
+        from bson import ObjectId
+        result = await self.documents.update_one(
+            {"_id": ObjectId(doc_id)},
+            {"$set": {"metadata": metadata}}
+        )
+        return result.modified_count > 0
 
     # ==================== RAG 索引操作 ====================
 
@@ -250,6 +270,10 @@ class MongoDB:
         # 任务集合索引
         await self.tasks.create_index("task_id", unique=True)
         await self.tasks.create_index("created_at")
+
+        # 对话集合索引
+        await self.conversations.create_index("conversation_id")
+        await self.conversations.create_index("created_at")
 
         logger.info("MongoDB 索引创建完成")
 
@@ -368,6 +392,108 @@ class MongoDB:
         """删除任务"""
         result = await self.tasks.delete_one({"task_id": task_id})
         return result.deleted_count > 0
+
+    # ==================== 对话历史操作 ====================
+
+    async def insert_conversation(
+        self,
+        conversation_id: str,
+        role: str,
+        content: str,
+        intent: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> str:
+        """
+        插入对话记录
+
+        Args:
+            conversation_id: 对话会话ID
+            role: 角色 (user/assistant)
+            content: 对话内容
+            intent: 意图类型
+            metadata: 额外元数据
+
+        Returns:
+            插入文档的ID
+        """
+        message = {
+            "conversation_id": conversation_id,
+            "role": role,
+            "content": content,
+            "intent": intent,
+            "metadata": metadata or {},
+            "created_at": datetime.utcnow(),
+        }
+        result = await self.conversations.insert_one(message)
+        return str(result.inserted_id)
+
+    async def get_conversation_history(
+        self,
+        conversation_id: str,
+        limit: int = 20,
+    ) -> List[Dict[str, Any]]:
+        """
+        获取对话历史
+
+        Args:
+            conversation_id: 对话会话ID
+            limit: 返回消息数量
+
+        Returns:
+            对话消息列表
+        """
+        cursor = self.conversations.find(
+            {"conversation_id": conversation_id}
+        ).sort("created_at", 1).limit(limit)
+
+        messages = []
+        async for msg in cursor:
+            msg["_id"] = str(msg["_id"])
+            if msg.get("created_at"):
+                msg["created_at"] = msg["created_at"].isoformat()
+            messages.append(msg)
+        return messages
+
+    async def delete_conversation(self, conversation_id: str) -> bool:
+        """删除对话会话"""
+        result = await self.conversations.delete_many({"conversation_id": conversation_id})
+        return result.deleted_count > 0
+
+    async def list_conversations(
+        self,
+        limit: int = 50,
+        skip: int = 0,
+    ) -> List[Dict[str, Any]]:
+        """
+        获取会话列表（按最近一条消息排序）
+
+        Args:
+            limit: 返回数量
+            skip: 跳过数量
+
+        Returns:
+            会话列表
+        """
+        # 使用 aggregation 获取每个会话的最新一条消息
+        pipeline = [
+            {"$sort": {"created_at": -1}},
+            {"$group": {
+                "_id": "$conversation_id",
+                "last_message": {"$first": "$$ROOT"},
+            }},
+            {"$replaceRoot": {"newRoot": "$last_message"}},
+            {"$sort": {"created_at": -1}},
+            {"$skip": skip},
+            {"$limit": limit},
+        ]
+
+        conversations = []
+        async for doc in self.conversations.aggregate(pipeline):
+            doc["_id"] = str(doc["_id"])
+            if doc.get("created_at"):
+                doc["created_at"] = doc["created_at"].isoformat()
+            conversations.append(doc)
+        return conversations
 
 
 # ==================== 全局单例 ====================

@@ -78,6 +78,19 @@ const Documents: React.FC = () => {
   const [expandedSheet, setExpandedSheet] = useState<string | null>(null);
   const [uploadExpanded, setUploadExpanded] = useState(false);
 
+  // 批量上传状态跟踪
+  type FileUploadStatus = 'pending' | 'uploading' | 'processing' | 'success' | 'failed';
+  interface UploadFileState {
+    file: File;
+    status: FileUploadStatus;
+    progress: number;
+    taskId?: string;
+    error?: string;
+    docId?: string;
+  }
+  const [uploadStates, setUploadStates] = useState<UploadFileState[]>([]);
+  const [batchTaskId, setBatchTaskId] = useState<string | null>(null);
+
   // AI 分析相关状态
   const [analyzing, setAnalyzing] = useState(false);
   const [analyzingForCharts, setAnalyzingForCharts] = useState(false);
@@ -211,21 +224,119 @@ const Documents: React.FC = () => {
     }
   };
 
-  // 文件上传处理
+  // 文件上传处理 - 批量上传
   const onDrop = async (acceptedFiles: File[]) => {
     if (acceptedFiles.length === 0) return;
 
+    // 初始化上传状态
+    const initialStates: UploadFileState[] = acceptedFiles.map(file => ({
+      file,
+      status: 'pending',
+      progress: 0
+    }));
+    setUploadStates(initialStates);
+    setUploadExpanded(true);
     setUploading(true);
+
+    try {
+      // 使用批量上传接口
+      const result = await backendApi.uploadDocuments(acceptedFiles);
+
+      if (result.task_id) {
+        setBatchTaskId(result.task_id);
+
+        // 更新所有文件状态为上传中
+        setUploadStates(prev => prev.map(s => ({ ...s, status: 'uploading', progress: 30 })));
+
+        // 轮询任务状态
+        let attempts = 0;
+        const maxAttempts = 150; // 最多5分钟
+
+        const checkBatchStatus = async () => {
+          while (attempts < maxAttempts) {
+            try {
+              const status = await backendApi.getTaskStatus(result.task_id);
+
+              if (status.status === 'success' && status.result) {
+                // 更新每个文件的状态
+                const fileResults = status.result.results || [];
+                setUploadStates(prev => prev.map((s, idx) => {
+                  const fileResult = fileResults[idx];
+                  if (fileResult?.success) {
+                    return { ...s, status: 'success', progress: 100, docId: fileResult.doc_id };
+                  } else {
+                    return { ...s, status: 'failed', progress: 0, error: fileResult?.error || '处理失败' };
+                  }
+                }));
+                loadDocuments();
+                return;
+              } else if (status.status === 'failure') {
+                setUploadStates(prev => prev.map(s => ({
+                  ...s,
+                  status: 'failed',
+                  error: status.error || '批量处理失败'
+                })));
+                return;
+              } else {
+                // 处理中 - 更新进度
+                const progress = status.progress || Math.min(30 + attempts * 2, 90);
+                setUploadStates(prev => prev.map(s => ({
+                  ...s,
+                  status: s.status === 'uploading' ? 'processing' : s.status,
+                  progress
+                })));
+              }
+            } catch (e) {
+              console.error('检查批量状态失败', e);
+            }
+            await new Promise(resolve => setTimeout(resolve, 2000));
+            attempts++;
+          }
+
+          // 超时
+          setUploadStates(prev => prev.map(s => {
+            if (s.status !== 'success') {
+              return { ...s, status: 'failed', error: '处理超时' };
+            }
+            return s;
+          }));
+        };
+
+        checkBatchStatus();
+      } else {
+        // 单文件直接上传（旧逻辑作为后备）
+        await handleSingleFileUploads(acceptedFiles);
+      }
+    } catch (error: any) {
+      toast.error(error.message || '上传失败');
+      setUploadStates(prev => prev.map(s => ({
+        ...s,
+        status: 'failed',
+        error: error.message || '上传失败'
+      })));
+    } finally {
+      setUploading(false);
+    }
+  };
+
+  // 单文件上传后备逻辑
+  const handleSingleFileUploads = async (files: File[]) => {
     let successCount = 0;
-    let failCount = 0;
     const successfulFiles: File[] = [];
 
-    // 逐个上传文件
-    for (const file of acceptedFiles) {
+    for (let i = 0; i < files.length; i++) {
+      const file = files[i];
       const ext = file.name.split('.').pop()?.toLowerCase();
+
+      setUploadStates(prev => prev.map((s, idx) =>
+        idx === i ? { ...s, status: 'uploading' } : s
+      ));
 
       try {
         if (ext === 'xlsx' || ext === 'xls') {
+          setUploadStates(prev => prev.map((s, idx) =>
+            idx === i ? { ...s, status: 'processing', progress: 50 } : s
+          ));
           const result = await backendApi.uploadExcel(file, {
             parseAllSheets: parseOptions.parseAllSheets,
             headerRow: parseOptions.headerRow
@@ -233,99 +344,60 @@ const Documents: React.FC = () => {
           if (result.success) {
             successCount++;
             successfulFiles.push(file);
-            // 第一个Excel文件设置解析结果供预览
+            setUploadStates(prev => prev.map((s, idx) =>
+              idx === i ? { ...s, status: 'success', progress: 100 } : s
+            ));
             if (successCount === 1) {
               setUploadedFile(file);
               setParseResult(result);
-              if (result.metadata?.sheet_count === 1) {
-                setExpandedSheet(Object.keys(result.data?.sheets || {})[0] || null);
-              }
             }
             loadDocuments();
           } else {
-            failCount++;
-            toast.error(`${file.name}: ${result.error || '解析失败'}`);
-          }
-        } else if (ext === 'md' || ext === 'markdown') {
-          const result = await backendApi.uploadDocument(file);
-          if (result.task_id) {
-            successCount++;
-            successfulFiles.push(file);
-            if (successCount === 1) {
-              setUploadedFile(file);
-            }
-            // 轮询任务状态
-            let attempts = 0;
-            const checkStatus = async () => {
-              while (attempts < 30) {
-                try {
-                  const status = await backendApi.getTaskStatus(result.task_id);
-                  if (status.status === 'success') {
-                    loadDocuments();
-                    return;
-                  } else if (status.status === 'failure') {
-                    return;
-                  }
-                } catch (e) {
-                  console.error('检查状态失败', e);
-                }
-                await new Promise(resolve => setTimeout(resolve, 2000));
-                attempts++;
-              }
-            };
-            checkStatus();
-          } else {
-            failCount++;
+            setUploadStates(prev => prev.map((s, idx) =>
+              idx === i ? { ...s, status: 'failed', error: result.error || '解析失败' } : s
+            ));
           }
         } else {
-          // 其他文档使用通用上传接口
+          setUploadStates(prev => prev.map((s, idx) =>
+            idx === i ? { ...s, status: 'processing', progress: 50 } : s
+          ));
           const result = await backendApi.uploadDocument(file);
           if (result.task_id) {
-            successCount++;
-            successfulFiles.push(file);
-            if (successCount === 1) {
-              setUploadedFile(file);
-            }
-            // 轮询任务状态
+            // 等待任务完成
             let attempts = 0;
-            const checkStatus = async () => {
-              while (attempts < 30) {
-                try {
-                  const status = await backendApi.getTaskStatus(result.task_id);
-                  if (status.status === 'success') {
-                    loadDocuments();
-                    return;
-                  } else if (status.status === 'failure') {
-                    return;
-                  }
-                } catch (e) {
-                  console.error('检查状态失败', e);
+            while (attempts < 60) {
+              const status = await backendApi.getTaskStatus(result.task_id);
+              if (status.status === 'success') {
+                successCount++;
+                successfulFiles.push(file);
+                setUploadStates(prev => prev.map((s, idx) =>
+                  idx === i ? { ...s, status: 'success', progress: 100, docId: status.result?.doc_id } : s
+                ));
+                if (successCount === 1) {
+                  setUploadedFile(file);
                 }
-                await new Promise(resolve => setTimeout(resolve, 2000));
-                attempts++;
+                loadDocuments();
+                break;
+              } else if (status.status === 'failure') {
+                setUploadStates(prev => prev.map((s, idx) =>
+                  idx === i ? { ...s, status: 'failed', error: status.error || '处理失败' } : s
+                ));
+                break;
               }
-            };
-            checkStatus();
-          } else {
-            failCount++;
+              await new Promise(resolve => setTimeout(resolve, 2000));
+              attempts++;
+            }
           }
         }
       } catch (error: any) {
-        failCount++;
-        toast.error(`${file.name}: ${error.message || '上传失败'}`);
+        setUploadStates(prev => prev.map((s, idx) =>
+          idx === i ? { ...s, status: 'failed', error: error.message || '上传失败' } : s
+        ));
       }
     }
 
-    setUploading(false);
-    loadDocuments();
-
     if (successCount > 0) {
-      toast.success(`成功上传 ${successCount} 个文件`);
       setUploadedFiles(prev => [...prev, ...successfulFiles]);
-      setUploadExpanded(true);
-    }
-    if (failCount > 0) {
-      toast.error(`${failCount} 个文件上传失败`);
     }
   };
 
@@ -699,7 +771,110 @@ const Documents: React.FC = () => {
             </CardHeader>
             {uploadPanelOpen && (
               <CardContent className="space-y-4">
-                {uploadedFiles.length > 0 || uploadedFile ? (
+                {/* 优先显示正在上传的状态 */}
+                {uploadStates.length > 0 && (
+                  <div className="space-y-3">
+                    {/* 上传状态头部 */}
+                    <div
+                      className="flex items-center justify-between p-3 bg-primary/5 rounded-xl cursor-pointer hover:bg-primary/10 transition-colors"
+                      onClick={() => setUploadExpanded(!uploadExpanded)}
+                    >
+                      <div className="flex items-center gap-3">
+                        <div className="w-10 h-10 rounded-lg bg-primary/10 text-primary flex items-center justify-center">
+                          {uploading ? <Loader2 size={20} className="animate-spin" /> : <Upload size={20} />}
+                        </div>
+                        <div>
+                          <p className="font-semibold text-sm">
+                            {uploading ? '正在上传' : '上传完成'} {uploadStates.length} 个文件
+                          </p>
+                          <p className="text-xs text-muted-foreground">
+                            {uploading ? '上传中，请稍候...' : uploadStates.filter(s => s.status === 'failed').length > 0 ? '部分失败' : '点击查看详情'}
+                          </p>
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        {!uploading && (
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setUploadStates([]);
+                              setUploadedFiles([]);
+                              setUploadedFile(null);
+                            }}
+                            className="text-destructive hover:text-destructive"
+                          >
+                            <Trash2 size={14} className="mr-1" />
+                            清空
+                          </Button>
+                        )}
+                        {uploadExpanded ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
+                      </div>
+                    </div>
+
+                    {/* 上传进度列表（总是展开显示） */}
+                    {uploadExpanded && (
+                      <div className="space-y-2 border rounded-xl p-3 bg-background">
+                        {uploadStates.map((state, index) => (
+                          <div key={index} className="flex items-center gap-3 p-2 rounded-lg hover:bg-muted/30 transition-colors">
+                            <div className={cn(
+                              "w-8 h-8 rounded flex items-center justify-center shrink-0",
+                              isExcelFile(state.file.name) ? "bg-emerald-500/10 text-emerald-500" : "bg-blue-500/10 text-blue-500"
+                            )}>
+                              {state.status === 'pending' && <Clock size={16} />}
+                              {state.status === 'uploading' && <Upload size={16} className="animate-pulse" />}
+                              {state.status === 'processing' && <Loader2 size={16} className="animate-spin" />}
+                              {state.status === 'success' && <CheckCircle size={16} className="text-green-500" />}
+                              {state.status === 'failed' && <AlertCircle size={16} className="text-red-500" />}
+                            </div>
+                            <div className="flex-1 min-w-0">
+                              <p className="text-sm truncate">{state.file.name}</p>
+                              <div className="flex items-center gap-2">
+                                {state.status === 'pending' && <p className="text-xs text-muted-foreground">等待上传...</p>}
+                                {state.status === 'uploading' && <p className="text-xs text-primary">上传中...</p>}
+                                {state.status === 'processing' && <p className="text-xs text-primary">处理中...</p>}
+                                {state.status === 'failed' && state.error && (
+                                  <p className="text-xs text-red-500 truncate">{state.error}</p>
+                                )}
+                                {state.status === 'success' && (
+                                  <p className="text-xs text-green-500">已完成</p>
+                                )}
+                              </div>
+                              {/* 进度条 */}
+                              {(state.status === 'uploading' || state.status === 'processing') && (
+                                <div className="mt-1 h-1 bg-muted rounded-full overflow-hidden">
+                                  <div
+                                    className="h-full bg-primary transition-all duration-300"
+                                    style={{ width: `${state.progress}%` }}
+                                  />
+                                </div>
+                              )}
+                            </div>
+                            {state.status === 'success' && (
+                              <CheckCircle size={16} className="text-green-500 shrink-0" />
+                            )}
+                            {state.status === 'failed' && (
+                              <Button
+                                variant="ghost"
+                                size="icon"
+                                className="text-destructive hover:bg-destructive/10 shrink-0"
+                                onClick={() => {
+                                  setUploadStates(prev => prev.filter((_, i) => i !== index));
+                                }}
+                              >
+                                <Trash2 size={14} />
+                              </Button>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {/* 已上传文件列表（没有正在上传时显示） */}
+                {uploadStates.length === 0 && (uploadedFiles.length > 0 || uploadedFile) ? (
                   <div className="space-y-3">
                     {/* 文件列表头部 */}
                     <div
@@ -739,6 +914,84 @@ const Documents: React.FC = () => {
                     {/* 展开的文件列表 */}
                     {uploadExpanded && (
                       <div className="space-y-2 border rounded-xl p-3">
+                        {/* 显示已上传文件列表 */}
+                        {(uploadedFiles.length > 0 ? uploadedFiles : [uploadedFile]).filter(Boolean).map((file, index) => (
+                          <div key={index} className="flex items-center gap-3 p-2 bg-background rounded-lg">
+                            <div className={cn(
+                              "w-8 h-8 rounded flex items-center justify-center",
+                              isExcelFile(file?.name || '') ? "bg-emerald-500/10 text-emerald-500" : "bg-blue-500/10 text-blue-500"
+                            )}>
+                              {isExcelFile(file?.name || '') ? <FileSpreadsheet size={16} /> : <FileText size={16} />}
+                            </div>
+                            <div className="flex-1 min-w-0">
+                              <p className="text-sm truncate">{file?.name}</p>
+                              <p className="text-xs text-muted-foreground">{formatFileSize(file?.size || 0)}</p>
+                            </div>
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              className="text-destructive hover:bg-destructive/10"
+                              onClick={() => handleRemoveUploadedFile(index)}
+                            >
+                              <Trash2 size={14} />
+                            </Button>
+                          </div>
+                        ))}
+
+                        {/* 继续添加按钮 */}
+                        <div
+                          {...getRootProps()}
+                          className="flex items-center justify-center gap-2 p-3 border-2 border-dashed rounded-lg cursor-pointer hover:border-primary/50 hover:bg-primary/5 transition-colors"
+                          onClick={(e) => e.stopPropagation()}
+                        >
+                          <input {...getInputProps()} multiple={true} />
+                          <Plus size={16} className="text-muted-foreground" />
+                          <span className="text-sm text-muted-foreground">继续添加更多文件</span>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                ) : (uploadedFiles.length > 0 || uploadedFile) ? (
+                  <div className="space-y-3">
+                    {/* 文件列表头部 */}
+                    <div
+                      className="flex items-center justify-between p-3 bg-muted/50 rounded-xl cursor-pointer hover:bg-muted/70 transition-colors"
+                      onClick={() => setUploadExpanded(!uploadExpanded)}
+                    >
+                      <div className="flex items-center gap-3">
+                        <div className="w-10 h-10 rounded-lg bg-primary/10 text-primary flex items-center justify-center">
+                          <Upload size={20} />
+                        </div>
+                        <div>
+                          <p className="font-semibold text-sm">
+                            已上传 {(uploadedFiles.length > 0 ? uploadedFiles : [uploadedFile]).length} 个文件
+                          </p>
+                          <p className="text-xs text-muted-foreground">
+                            {uploadExpanded ? '点击收起' : '点击展开查看'}
+                          </p>
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            handleDeleteFile();
+                          }}
+                          className="text-destructive hover:text-destructive"
+                        >
+                          <Trash2 size={14} className="mr-1" />
+                          清空
+                        </Button>
+                        {uploadExpanded ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
+                      </div>
+                    </div>
+
+                    {/* 展开的文件列表 */}
+                    {uploadExpanded && (
+                      <div className="space-y-2 border rounded-xl p-3">
+                        {/* 显示已上传文件列表 */}
                         {(uploadedFiles.length > 0 ? uploadedFiles : [uploadedFile]).filter(Boolean).map((file, index) => (
                           <div key={index} className="flex items-center gap-3 p-2 bg-background rounded-lg">
                             <div className={cn(

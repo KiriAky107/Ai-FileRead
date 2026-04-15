@@ -44,6 +44,22 @@ class DocxParser(BaseParser):
                 error=f"文件不存在: {file_path}"
             )
 
+        # 尝试使用 python-docx 解析，失败则使用备用方法
+        try:
+            return self._parse_with_docx(path)
+        except Exception as e:
+            logger.warning(f"python-docx 解析失败，使用备用方法: {e}")
+            try:
+                return self._parse_fallback(path)
+            except Exception as fallback_error:
+                logger.error(f"备用解析方法也失败: {fallback_error}")
+                return ParseResult(
+                    success=False,
+                    error=f"解析 Word 文档失败: {str(e)}"
+                )
+
+    def _parse_with_docx(self, path: Path) -> ParseResult:
+        """使用 python-docx 解析文档"""
         # 检查文件扩展名
         if path.suffix.lower() not in self.supported_extensions:
             return ParseResult(
@@ -51,98 +67,177 @@ class DocxParser(BaseParser):
                 error=f"不支持的文件类型: {path.suffix}"
             )
 
+        # 读取 Word 文档
+        doc = Document(path)
+
+        # 提取文本内容
+        paragraphs = []
+        for para in doc.paragraphs:
+            if para.text.strip():
+                paragraphs.append({
+                    "text": para.text,
+                    "style": str(para.style.name) if para.style else "Normal"
+                })
+
+        # 提取段落纯文本（用于 AI 解析）
+        paragraphs_text = [p["text"] for p in paragraphs if p["text"].strip()]
+
+        # 提取表格内容
+        tables_data = []
+        for i, table in enumerate(doc.tables):
+            table_rows = []
+            for row in table.rows:
+                row_data = [cell.text.strip() for cell in row.cells]
+                table_rows.append(row_data)
+
+            if table_rows:
+                tables_data.append({
+                    "table_index": i,
+                    "rows": table_rows,
+                    "row_count": len(table_rows),
+                    "column_count": len(table_rows[0]) if table_rows else 0
+                })
+
+        # 提取图片/嵌入式对象信息
+        images_info = self._extract_images_info(doc, path)
+
+        # 合并所有文本（包括图片描述）
+        full_text_parts = []
+        full_text_parts.append("【文档正文】")
+        full_text_parts.extend(paragraphs_text)
+
+        if tables_data:
+            full_text_parts.append("\n【文档表格】")
+            for idx, table in enumerate(tables_data):
+                full_text_parts.append(f"--- 表格 {idx + 1} ---")
+                for row in table["rows"]:
+                    full_text_parts.append(" | ".join(str(cell) for cell in row))
+
+        if images_info.get("image_count", 0) > 0:
+            full_text_parts.append(f"\n【文档图片】文档包含 {images_info['image_count']} 张图片/图表")
+
+        full_text = "\n".join(full_text_parts)
+
+        # 构建元数据
+        metadata = {
+            "filename": path.name,
+            "extension": path.suffix.lower(),
+            "paragraph_count": len(paragraphs),
+            "table_count": len(tables_data),
+            "image_count": images_info.get("image_count", 0)
+        }
+
+        return ParseResult(
+            success=True,
+            data={
+                "content": full_text,
+                "paragraphs": paragraphs,
+                "paragraphs_with_style": paragraphs,
+                "tables": tables_data,
+                "images": images_info
+            },
+            metadata=metadata
+        )
+
+    def _parse_fallback(self, path: Path) -> ParseResult:
+        """备用解析方法：直接解析 docx 的 XML 结构"""
+        import zipfile
+        from xml.etree import ElementTree as ET
+
         try:
-            # 读取 Word 文档
-            doc = Document(file_path)
+            with zipfile.ZipFile(path, 'r') as zf:
+                # 读取 document.xml
+                if 'word/document.xml' not in zf.namelist():
+                    return ParseResult(success=False, error="无效的 docx 文件格式")
 
-            # 提取文本内容
-            paragraphs = []
-            for para in doc.paragraphs:
-                if para.text.strip():
-                    paragraphs.append({
-                        "text": para.text,
-                        "style": str(para.style.name) if para.style else "Normal"
+                xml_content = zf.read('word/document.xml')
+                root = ET.fromstring(xml_content)
+
+                # 命名空间
+                namespaces = {
+                    'w': 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'
+                }
+
+                paragraphs = []
+                tables = []
+                current_table = []
+
+                for elem in root.iter():
+                    if elem.tag.endswith('}p'):  # 段落
+                        text_parts = []
+                        for t in elem.iter():
+                            if t.tag.endswith('}t') and t.text:
+                                text_parts.append(t.text)
+                        text = ''.join(text_parts).strip()
+                        if text:
+                            paragraphs.append({'text': text, 'style': 'Normal'})
+                    elif elem.tag.endswith('}tr'):  # 表格行
+                        row_data = []
+                        for tc in elem.iter():
+                            if tc.tag.endswith('}tc'):  # 单元格
+                                cell_text = []
+                                for t in tc.iter():
+                                    if t.tag.endswith('}t') and t.text:
+                                        cell_text.append(t.text)
+                                row_data.append(''.join(cell_text).strip())
+                        if row_data:
+                            current_table.append(row_data)
+                    else:
+                        # 表格结束，保存
+                        if current_table:
+                            tables.append({
+                                'table_index': len(tables),
+                                'rows': current_table,
+                                'row_count': len(current_table),
+                                'column_count': len(current_table[0]) if current_table else 0
+                            })
+                            current_table = []
+
+                # 保存最后一张表格
+                if current_table:
+                    tables.append({
+                        'table_index': len(tables),
+                        'rows': current_table,
+                        'row_count': len(current_table),
+                        'column_count': len(current_table[0]) if current_table else 0
                     })
 
-            # 提取段落纯文本（用于 AI 解析）
-            paragraphs_text = [p["text"] for p in paragraphs if p["text"].strip()]
+                # 构建文本
+                paragraphs_text = [p["text"] for p in paragraphs]
+                full_text_parts = ["【文档正文】"] + paragraphs_text
 
-            # 提取表格内容
-            tables_data = []
-            for i, table in enumerate(doc.tables):
-                table_rows = []
-                for row in table.rows:
-                    row_data = [cell.text.strip() for cell in row.cells]
-                    table_rows.append(row_data)
+                if tables:
+                    full_text_parts.append("\n【文档表格】")
+                    for idx, table in enumerate(tables):
+                        full_text_parts.append(f"--- 表格 {idx + 1} ---")
+                        for row in table["rows"]:
+                            full_text_parts.append(" | ".join(str(cell) for cell in row))
 
-                if table_rows:
-                    tables_data.append({
-                        "table_index": i,
-                        "rows": table_rows,
-                        "row_count": len(table_rows),
-                        "column_count": len(table_rows[0]) if table_rows else 0
-                    })
+                full_text = "\n".join(full_text_parts)
 
-            # 提取图片/嵌入式对象信息
-            images_info = self._extract_images_info(doc, path)
-
-            # 合并所有文本（包括图片描述）
-            full_text_parts = []
-            full_text_parts.append("【文档正文】")
-            full_text_parts.extend(paragraphs_text)
-
-            if tables_data:
-                full_text_parts.append("\n【文档表格】")
-                for idx, table in enumerate(tables_data):
-                    full_text_parts.append(f"--- 表格 {idx + 1} ---")
-                    for row in table["rows"]:
-                        full_text_parts.append(" | ".join(str(cell) for cell in row))
-
-            if images_info.get("image_count", 0) > 0:
-                full_text_parts.append(f"\n【文档图片】文档包含 {images_info['image_count']} 张图片/图表")
-
-            full_text = "\n".join(full_text_parts)
-
-            # 构建元数据
-            metadata = {
-                "filename": path.name,
-                "extension": path.suffix.lower(),
-                "file_size": path.stat().st_size,
-                "paragraph_count": len(paragraphs),
-                "table_count": len(tables_data),
-                "word_count": len(full_text),
-                "char_count": len(full_text.replace("\n", "")),
-                "has_tables": len(tables_data) > 0,
-                "has_images": images_info.get("image_count", 0) > 0,
-                "image_count": images_info.get("image_count", 0)
-            }
-
-            # 返回结果
-            return ParseResult(
-                success=True,
-                data={
-                    "content": full_text,
-                    "paragraphs": paragraphs_text,
-                    "paragraphs_with_style": paragraphs,
-                    "tables": tables_data,
-                    "images": images_info,
-                    "word_count": len(full_text),
-                    "structured_data": {
+                return ParseResult(
+                    success=True,
+                    data={
+                        "content": full_text,
                         "paragraphs": paragraphs,
-                        "paragraphs_text": paragraphs_text,
-                        "tables": tables_data,
-                        "images": images_info
+                        "paragraphs_with_style": paragraphs,
+                        "tables": tables,
+                        "images": {"image_count": 0, "descriptions": []}
+                    },
+                    metadata={
+                        "filename": path.name,
+                        "extension": path.suffix.lower(),
+                        "paragraph_count": len(paragraphs),
+                        "table_count": len(tables),
+                        "image_count": 0,
+                        "parse_method": "fallback_xml"
                     }
-                },
-                metadata=metadata
-            )
+                )
 
+        except zipfile.BadZipFile:
+            return ParseResult(success=False, error="无效的 ZIP/文档文件")
         except Exception as e:
-            logger.error(f"解析 Word 文档失败: {str(e)}")
-            return ParseResult(
-                success=False,
-                error=f"解析 Word 文档失败: {str(e)}"
-            )
+            return ParseResult(success=False, error=f"备用解析失败: {str(e)}")
 
     def extract_images_as_base64(self, file_path: str) -> List[Dict[str, str]]:
         """
@@ -196,6 +291,83 @@ class DocxParser(BaseParser):
 
         logger.info(f"共提取 {len(images)} 张图片")
         return images
+
+    def extract_text_from_images(self, file_path: str, lang: str = 'chi_sim+eng') -> Dict[str, Any]:
+        """
+        对 Word 文档中的图片进行 OCR 文字识别
+
+        Args:
+            file_path: Word 文件路径
+            lang: Tesseract 语言代码，默认简体中文+英文 (chi_sim+eng)
+
+        Returns:
+            包含识别结果的字典
+        """
+        import zipfile
+        from io import BytesIO
+        from PIL import Image
+
+        try:
+            import pytesseract
+        except ImportError:
+            logger.warning("pytesseract 未安装，OCR 功能不可用")
+            return {
+                "success": False,
+                "error": "pytesseract 未安装，请运行: pip install pytesseract",
+                "image_count": 0,
+                "extracted_text": []
+            }
+
+        results = {
+            "success": True,
+            "image_count": 0,
+            "extracted_text": [],
+            "total_chars": 0
+        }
+
+        try:
+            with zipfile.ZipFile(file_path, 'r') as zf:
+                # 查找 word/media 目录下的图片文件
+                media_files = [f for f in zf.namelist() if f.startswith('word/media/')]
+
+                for idx, filename in enumerate(media_files):
+                    ext = filename.split('.')[-1].lower()
+                    if ext not in ['png', 'jpg', 'jpeg', 'gif', 'bmp']:
+                        continue
+
+                    try:
+                        # 读取图片数据
+                        image_data = zf.read(filename)
+                        image = Image.open(BytesIO(image_data))
+
+                        # 使用 Tesseract OCR 提取文字
+                        text = pytesseract.image_to_string(image, lang=lang)
+                        text = text.strip()
+
+                        if text:
+                            results["extracted_text"].append({
+                                "image_index": idx,
+                                "filename": filename,
+                                "text": text,
+                                "char_count": len(text)
+                            })
+                            results["total_chars"] += len(text)
+
+                        logger.info(f"图片 {filename} OCR 识别完成，提取 {len(text)} 字符")
+
+                    except Exception as e:
+                        logger.warning(f"图片 {filename} OCR 识别失败: {str(e)}")
+
+                results["image_count"] = len(results["extracted_text"])
+
+        except zipfile.BadZipFile:
+            results["success"] = False
+            results["error"] = "无效的 Word 文档文件"
+        except Exception as e:
+            results["success"] = False
+            results["error"] = f"OCR 处理失败: {str(e)}"
+
+        return results
 
     def extract_key_sentences(self, text: str, max_sentences: int = 10) -> List[str]:
         """

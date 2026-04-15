@@ -4,6 +4,7 @@
 支持多格式文档(docx/xlsx/md/txt)上传、解析、存储和RAG索引
 集成 Excel 存储和 AI 生成字段描述
 """
+import asyncio
 import logging
 import uuid
 from typing import List, Optional
@@ -258,6 +259,7 @@ async def process_document(
         )
 
         # 如果是 Excel，存储到 MySQL + AI生成描述 + RAG索引
+        mysql_table_name = None
         if doc_type in ["xlsx", "xls"]:
             await update_task_status(
                 task_id, status="processing",
@@ -265,17 +267,29 @@ async def process_document(
             )
 
             try:
-                # 使用 TableRAG 服务完成建表和RAG索引
+                # 使用 TableRAG 服务存储到 MySQL（跳过 RAG 索引以提升速度）
                 logger.info(f"开始存储Excel到MySQL: {original_filename}, file_path: {file_path}")
                 rag_result = await table_rag_service.build_table_rag_index(
                     file_path=file_path,
                     filename=original_filename,
                     sheet_name=parse_options.get("sheet_name"),
-                    header_row=parse_options.get("header_row", 0)
+                    header_row=parse_options.get("header_row", 0),
+                    skip_rag_index=True  # 跳过 AI 字段描述生成和索引
                 )
 
                 if rag_result.get("success"):
-                    logger.info(f"Excel存储到MySQL成功: {original_filename}, table: {rag_result.get('table_name')}")
+                    mysql_table_name = rag_result.get('table_name')
+                    logger.info(f"Excel存储到MySQL成功: {original_filename}, table: {mysql_table_name}")
+                    # 更新 MongoDB 中的 metadata，记录 MySQL 表名
+                    try:
+                        doc = await mongodb.get_document(doc_id)
+                        if doc:
+                            metadata = doc.get("metadata", {})
+                            metadata["mysql_table_name"] = mysql_table_name
+                            await mongodb.update_document_metadata(doc_id, metadata)
+                            logger.info(f"已更新 MongoDB 文档的 mysql_table_name: {mysql_table_name}")
+                    except Exception as update_err:
+                        logger.warning(f"更新 MongoDB mysql_table_name 失败: {update_err}")
                 else:
                     logger.error(f"RAG索引构建失败: {rag_result.get('error')}")
             except Exception as e:
@@ -283,17 +297,16 @@ async def process_document(
 
         else:
             # 非结构化文档
-            await update_task_status(
-                task_id, status="processing",
-                progress=60, message="正在建立索引"
-            )
-
-            # 如果文档中有表格数据，提取并存储到 MySQL + RAG
             structured_data = result.data.get("structured_data", {})
             tables = structured_data.get("tables", [])
 
+            # 如果文档中有表格数据，提取并存储到 MySQL（不需要 RAG 索引）
             if tables:
-                # 对每个表格建立 MySQL 表和 RAG 索引
+                await update_task_status(
+                    task_id, status="processing",
+                    progress=60, message="正在存储表格数据"
+                )
+                # 对每个表格建立 MySQL 表（跳过 RAG 索引，速度更快）
                 for table_info in tables:
                     await table_rag_service.index_document_table(
                         doc_id=doc_id,
@@ -302,8 +315,14 @@ async def process_document(
                         source_doc_type=doc_type
                     )
 
-            # 同时对文档内容建立 RAG 索引
-            await index_document_to_rag(doc_id, original_filename, result, doc_type)
+            # 对文档内容建立 RAG 索引（非结构化文本需要语义搜索）
+            content = result.data.get("content", "")
+            if content and len(content) > 50:  # 只有内容足够长才建立索引
+                await update_task_status(
+                    task_id, status="processing",
+                    progress=80, message="正在建立语义索引"
+                )
+                await index_document_to_rag(doc_id, original_filename, result, doc_type)
 
         # 完成
         await update_task_status(
@@ -328,71 +347,94 @@ async def process_document(
 
 
 async def process_documents_batch(task_id: str, files: List[dict]):
-    """批量处理文档"""
+    """批量并行处理文档"""
     try:
         await update_task_status(
             task_id, status="processing",
-            progress=0, message="开始批量处理"
+            progress=0, message=f"开始批量处理 {len(files)} 个文档",
+            result={"total": len(files), "files": []}
         )
 
-        results = []
-        for i, file_info in enumerate(files):
+        async def process_single_file(file_info: dict, index: int) -> dict:
+            """处理单个文件"""
+            filename = file_info["filename"]
             try:
+                # 解析文档
                 parser = ParserFactory.get_parser(file_info["path"])
                 result = parser.parse(file_info["path"])
 
-                if result.success:
-                    doc_id = await mongodb.insert_document(
-                        doc_type=file_info["ext"],
-                        content=result.data.get("content", ""),
-                        metadata={
-                            **result.metadata,
-                            "original_filename": file_info["filename"],
-                            "file_path": file_info["path"]
-                        },
-                        structured_data=result.data.get("structured_data")
+                if not result.success:
+                    return {"index": index, "filename": filename, "success": False, "error": result.error or "解析失败"}
+
+                # 存储到 MongoDB
+                doc_id = await mongodb.insert_document(
+                    doc_type=file_info["ext"],
+                    content=result.data.get("content", ""),
+                    metadata={
+                        **result.metadata,
+                        "original_filename": filename,
+                        "file_path": file_info["path"]
+                    },
+                    structured_data=result.data.get("structured_data")
+                )
+
+                # Excel 处理
+                if file_info["ext"] in ["xlsx", "xls"]:
+                    await table_rag_service.build_table_rag_index(
+                        file_path=file_info["path"],
+                        filename=filename,
+                        skip_rag_index=True  # 跳过 AI 字段描述生成和索引
                     )
-
-                    # Excel 处理
-                    if file_info["ext"] in ["xlsx", "xls"]:
-                        await table_rag_service.build_table_rag_index(
-                            file_path=file_info["path"],
-                            filename=file_info["filename"]
-                        )
-                    else:
-                        # 非结构化文档：处理其中的表格 + 内容索引
-                        structured_data = result.data.get("structured_data", {})
-                        tables = structured_data.get("tables", [])
-
-                        if tables:
-                            for table_info in tables:
-                                await table_rag_service.index_document_table(
-                                    doc_id=doc_id,
-                                    filename=file_info["filename"],
-                                    table_data=table_info,
-                                    source_doc_type=file_info["ext"]
-                                )
-
-                        await index_document_to_rag(doc_id, file_info["filename"], result, file_info["ext"])
-
-                    results.append({"filename": file_info["filename"], "doc_id": doc_id, "success": True})
                 else:
-                    results.append({"filename": file_info["filename"], "success": False, "error": result.error})
+                    # 非结构化文档
+                    structured_data = result.data.get("structured_data", {})
+                    tables = structured_data.get("tables", [])
+
+                    # 表格数据直接存 MySQL（跳过 RAG 索引）
+                    if tables:
+                        for table_info in tables:
+                            await table_rag_service.index_document_table(
+                                doc_id=doc_id,
+                                filename=filename,
+                                table_data=table_info,
+                                source_doc_type=file_info["ext"]
+                            )
+
+                    # 只有内容足够长才建立语义索引
+                    content = result.data.get("content", "")
+                    if content and len(content) > 50:
+                        await index_document_to_rag(doc_id, filename, result, file_info["ext"])
+
+                return {"index": index, "filename": filename, "doc_id": doc_id, "success": True}
 
             except Exception as e:
-                results.append({"filename": file_info["filename"], "success": False, "error": str(e)})
+                logger.error(f"处理文件 {filename} 失败: {e}")
+                return {"index": index, "filename": filename, "success": False, "error": str(e)}
 
-            progress = int((i + 1) / len(files) * 100)
-            await update_task_status(
-                task_id, status="processing",
-                progress=progress, message=f"已处理 {i+1}/{len(files)}"
-            )
+        # 并行处理所有文档
+        tasks = [process_single_file(f, i) for i, f in enumerate(files)]
+        results = await asyncio.gather(*tasks)
 
+        # 按原始顺序排序
+        results.sort(key=lambda x: x["index"])
+
+        # 统计成功/失败数量
+        success_count = sum(1 for r in results if r["success"])
+        fail_count = len(results) - success_count
+
+        # 更新最终状态
         await update_task_status(
             task_id, status="success",
-            progress=100, message="批量处理完成",
-            result={"results": results}
+            progress=100, message=f"批量处理完成: {success_count} 成功, {fail_count} 失败",
+            result={
+                "total": len(files),
+                "success": success_count,
+                "failure": fail_count,
+                "results": results
+            }
         )
+
+        logger.info(f"批量处理完成: {success_count}/{len(files)} 成功")
 
     except Exception as e:
         logger.error(f"批量处理失败: {str(e)}")
@@ -404,20 +446,20 @@ async def process_documents_batch(task_id: str, files: List[dict]):
 
 
 async def index_document_to_rag(doc_id: str, filename: str, result: ParseResult, doc_type: str):
-    """将非结构化文档索引到 RAG（使用分块索引）"""
+    """将非结构化文档索引到 RAG（使用分块索引，异步执行）"""
     try:
         content = result.data.get("content", "")
         if content:
-            # 将完整内容传递给 RAG 服务自动分块索引
-            rag_service.index_document_content(
+            # 使用异步方法索引，避免阻塞事件循环
+            await rag_service.index_document_content_async(
                 doc_id=doc_id,
-                content=content,  # 传递完整内容，由 RAG 服务自动分块
+                content=content,
                 metadata={
                     "filename": filename,
                     "doc_type": doc_type
                 },
-                chunk_size=500,  # 每块 500 字符
-                chunk_overlap=50  # 块之间 50 字符重叠
+                chunk_size=1000,  # 每块 1000 字符，提升速度
+                chunk_overlap=100  # 块之间 100 字符重叠
             )
             logger.info(f"RAG 索引完成: {filename}, doc_id={doc_id}")
     except Exception as e:

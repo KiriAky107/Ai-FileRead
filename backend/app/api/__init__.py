@@ -14,6 +14,7 @@ from app.api.endpoints import (
     analysis_charts,
     health,
     instruction,    # 智能指令
+    conversation,   # 对话历史
 )
 
 # 创建主路由
@@ -31,3 +32,4 @@ api_router.include_router(ai_analyze.router)       # AI分析
 api_router.include_router(visualization.router)    # 可视化
 api_router.include_router(analysis_charts.router)  # 分析图表
 api_router.include_router(instruction.router)      # 智能指令
+api_router.include_router(conversation.router)     # 对话历史

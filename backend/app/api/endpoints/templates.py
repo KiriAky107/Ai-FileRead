@@ -87,6 +87,7 @@ class ExportRequest(BaseModel):
     template_id: str
     filled_data: dict
     format: str = "xlsx"  # xlsx 或 docx
+    filled_file_path: Optional[str] = None  # 已填写的 Word 文件路径（可选）
 
 
 # ==================== 接口实现 ====================
@@ -541,7 +542,7 @@ async def export_filled_template(
         if request.format == "xlsx":
             return await _export_to_excel(request.filled_data, request.template_id)
         elif request.format == "docx":
-            return await _export_to_word(request.filled_data, request.template_id)
+            return await _export_to_word(request.filled_data, request.template_id, request.filled_file_path)
         else:
             raise HTTPException(
                 status_code=400,
@@ -608,11 +609,12 @@ async def _export_to_excel(filled_data: dict, template_id: str) -> StreamingResp
     )
 
 
-async def _export_to_word(filled_data: dict, template_id: str) -> StreamingResponse:
+async def _export_to_word(filled_data: dict, template_id: str, filled_file_path: Optional[str] = None) -> StreamingResponse:
     """导出为 Word 格式"""
     import re
     import tempfile
     import os
+    import urllib.parse
     from docx import Document
     from docx.shared import Pt, RGBColor
     from docx.enum.text import WD_ALIGN_PARAGRAPH
@@ -623,12 +625,32 @@ async def _export_to_word(filled_data: dict, template_id: str) -> StreamingRespo
             return ""
         # 移除控制字符
         text = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]', '', text)
+        # 转义 XML 特殊字符以防破坏文档结构
+        text = text.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
         return text.strip()
 
+    tmp_path = None
     try:
-        # 先保存到临时文件，再读取到内存，确保文档完整性
-        with tempfile.NamedTemporaryFile(delete=False, suffix='.docx') as tmp_file:
-            tmp_path = tmp_file.name
+        # 如果有已填写的文件（通过 _fill_docx 填写了模板单元格），直接返回该文件
+        if filled_file_path and os.path.exists(filled_file_path):
+            filename = os.path.basename(filled_file_path)
+            with open(filled_file_path, 'rb') as f:
+                file_content = f.read()
+            output = io.BytesIO(file_content)
+            encoded_filename = urllib.parse.quote(filename)
+            return StreamingResponse(
+                output,
+                media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                headers={
+                    "Content-Disposition": f"attachment; filename*=UTF-8''{encoded_filename}",
+                    "Content-Length": str(len(file_content))
+                }
+            )
+
+        # 没有已填写文件，创建新的 Word 文档（表格形式）
+        # 创建临时文件（立即关闭句柄，避免 Windows 文件锁问题）
+        tmp_fd, tmp_path = tempfile.mkstemp(suffix='.docx')
+        os.close(tmp_fd)  # 关闭立即得到的 fd，让 docx 可以写入
 
         doc = Document()
         doc.add_heading('填写结果', level=1)
@@ -670,19 +692,23 @@ async def _export_to_word(filled_data: dict, template_id: str) -> StreamingRespo
 
     finally:
         # 清理临时文件
-        if os.path.exists(tmp_path):
+        if tmp_path and os.path.exists(tmp_path):
             try:
                 os.unlink(tmp_path)
-            except:
+            except Exception:
                 pass
 
     output = io.BytesIO(file_content)
     filename = "filled_template.docx"
+    encoded_filename = urllib.parse.quote(filename)
 
     return StreamingResponse(
         output,
         media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        headers={"Content-Disposition": f"attachment; filename*=UTF-8''{filename}"}
+        headers={
+            "Content-Disposition": f"attachment; filename*=UTF-8''{encoded_filename}",
+            "Content-Length": str(len(file_content))
+        }
     )
 
 

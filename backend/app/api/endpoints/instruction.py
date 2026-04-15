@@ -25,6 +25,7 @@ class InstructionRequest(BaseModel):
     instruction: str
     doc_ids: Optional[List[str]] = None  # 关联的文档 ID 列表
     context: Optional[Dict[str, Any]] = None  # 额外上下文
+    conversation_id: Optional[str] = None  # 对话会话ID，用于关联历史记录
 
 
 class IntentRecognitionResponse(BaseModel):
@@ -240,7 +241,8 @@ async def instruction_chat(
             task_id=task_id,
             instruction=request.instruction,
             doc_ids=request.doc_ids,
-            context=request.context
+            context=request.context,
+            conversation_id=request.conversation_id
         )
 
         return {
@@ -251,14 +253,15 @@ async def instruction_chat(
         }
 
     # 同步模式：等待执行完成
-    return await _execute_chat_task(task_id, request.instruction, request.doc_ids, request.context)
+    return await _execute_chat_task(task_id, request.instruction, request.doc_ids, request.context, request.conversation_id)
 
 
 async def _execute_chat_task(
     task_id: str,
     instruction: str,
     doc_ids: Optional[List[str]],
-    context: Optional[Dict[str, Any]]
+    context: Optional[Dict[str, Any]],
+    conversation_id: Optional[str] = None
 ):
     """执行指令对话的后台任务"""
     from app.core.database import mongodb as mongo_client
@@ -278,6 +281,13 @@ async def _execute_chat_task(
         # 构建上下文
         ctx: Dict[str, Any] = context or {}
 
+        # 获取对话历史
+        if conversation_id:
+            history = await mongo_client.get_conversation_history(conversation_id, limit=20)
+            if history:
+                ctx["conversation_history"] = history
+                logger.info(f"加载对话历史: conversation_id={conversation_id}, 消息数={len(history)}")
+
         # 获取关联文档
         if doc_ids:
             docs = []
@@ -290,6 +300,29 @@ async def _execute_chat_task(
 
         # 执行指令
         result = await instruction_executor.execute(instruction, ctx)
+
+        # 存储对话历史
+        if conversation_id:
+            try:
+                # 存储用户消息
+                await mongo_client.insert_conversation(
+                    conversation_id=conversation_id,
+                    role="user",
+                    content=instruction,
+                    intent=result.get("intent", "unknown")
+                )
+                # 存储助手回复
+                response_content = result.get("message", "")
+                if response_content:
+                    await mongo_client.insert_conversation(
+                        conversation_id=conversation_id,
+                        role="assistant",
+                        content=response_content,
+                        intent=result.get("intent", "unknown")
+                    )
+                logger.info(f"已存储对话历史: conversation_id={conversation_id}")
+            except Exception as e:
+                logger.error(f"存储对话历史失败: {e}")
 
         # 根据意图类型添加友好的响应消息
         response_messages = {

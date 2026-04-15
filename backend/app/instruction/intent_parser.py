@@ -28,7 +28,7 @@ class IntentParser:
     INTENT_KEYWORDS = {
         INTENT_EXTRACT: ["提取", "抽取", "获取", "找出", "查找", "识别", "找到"],
         INTENT_FILL_TABLE: ["填表", "填写", "填充", "录入", "导入到表格", "填写到"],
-        INTENT_SUMMARIZE: ["总结", "摘要", "概括", "概述", "归纳", "提炼"],
+        INTENT_SUMMARIZE: ["总结", "摘要", "概括", "概述", "归纳", "提炼", "分析", "聊聊"],
         INTENT_QUESTION: ["问答", "回答", "解释", "什么是", "为什么", "如何", "怎样", "多少", "几个"],
         INTENT_SEARCH: ["搜索", "查找", "检索", "查询", "找"],
         INTENT_COMPARE: ["对比", "比较", "差异", "区别", "不同"],
@@ -47,12 +47,13 @@ class IntentParser:
     def __init__(self):
         self.intent_history: List[Dict[str, Any]] = []
 
-    async def parse(self, text: str) -> Tuple[str, Dict[str, Any]]:
+    async def parse(self, text: str, context: Dict[str, Any] = None) -> Tuple[str, Dict[str, Any]]:
         """
         解析自然语言指令
 
         Args:
             text: 用户输入的自然语言
+            context: 执行上下文（包含对话历史等）
 
         Returns:
             (意图类型, 参数字典)
@@ -61,11 +62,17 @@ class IntentParser:
         if not text:
             return self.INTENT_UNKNOWN, {}
 
+        # 检查对话历史中的上下文
+        conversation_history = []
+        if context and context.get("conversation_history"):
+            conversation_history = context.get("conversation_history", [])
+            logger.info(f"解析时使用对话历史: {len(conversation_history)} 条消息")
+
         # 记录历史
         self.intent_history.append({"text": text, "intent": None})
 
-        # 识别意图
-        intent = self._recognize_intent(text)
+        # 识别意图（考虑对话上下文）
+        intent = self._recognize_intent_with_context(text, conversation_history)
 
         # 提取参数
         params = self._extract_params(text, intent)
@@ -77,6 +84,42 @@ class IntentParser:
         logger.info(f"意图解析: text={text[:50]}..., intent={intent}, params={params}")
 
         return intent, params
+
+    def _recognize_intent_with_context(self, text: str, conversation_history: List[Dict[str, Any]]) -> str:
+        """
+        基于对话历史识别意图
+
+        Args:
+            text: 当前用户输入
+            conversation_history: 对话历史
+
+        Returns:
+            意图类型
+        """
+        # 如果对话历史为空，使用基础意图识别
+        if not conversation_history:
+            return self._recognize_intent(text)
+
+        # 基于历史上下文进行意图识别
+        # 分析最近的对话了解用户意图的延续性
+        last_intent = None
+        last_topic = None
+
+        for msg in conversation_history[-5:]:  # 最多看最近5条消息
+            if msg.get("role") == "assistant":
+                last_intent = msg.get("intent")
+            if msg.get("intent") and msg.get("intent") != "unknown":
+                last_topic = msg.get("intent")
+
+        # 如果当前消息很短（如"继续"、"是的"），可能延续之前的意图
+        short_confirmation = ["是", "是的", "好", "继续", "ok", "好", "接着", "然后", "还有吗"]
+        if text.strip() in short_confirmation or len(text.strip()) <= 3:
+            if last_topic:
+                logger.info(f"简短确认，延续之前的意图: {last_topic}")
+                return last_topic
+
+        # 否则使用标准意图识别
+        return self._recognize_intent(text)
 
     def _recognize_intent(self, text: str) -> str:
         """识别意图类型"""
@@ -214,18 +257,27 @@ class IntentParser:
         return template_info if template_info else None
 
     def _extract_target_fields(self, text: str) -> List[str]:
-        """提取目标字段"""
+        """提取目标字段 - 按分隔符切分再逐段清理"""
         fields = []
 
-        # 匹配 "提取XXX和YYY"、"抽取XXX、YYY"
-        patterns = [
-            r"提取([^(and|,|，)+]+?)(?:和|与|、|,|plus)",
-            r"抽取([^(and|,|，)+]+?)(?:和|与|、|,|plus)",
-        ]
+        # 去除提取/抽取前缀
+        cleaned_text = re.sub(r"^(?:提取|抽取)", "", text).strip()
 
-        for pattern in patterns:
-            matches = re.findall(pattern, text)
-            fields.extend([m.strip() for m in matches if m.strip()])
+        # 按'和'、'与'、'、'分割成多段
+        segments = re.split(r"[和与、]", cleaned_text)
+
+        # 常见前缀（这些不是字段名，需要去除）
+        prefixes = ["文档中的", "文档中", "文件中的", "文件中", "内容中的", "内容中"]
+
+        for seg in segments:
+            seg = seg.strip()
+            # 去除常见前缀
+            for p in prefixes:
+                if seg.startswith(p):
+                    seg = seg[len(p):]
+                    break
+            if seg and 2 <= len(seg) <= 20:
+                fields.append(seg)
 
         return list(set(fields))
 

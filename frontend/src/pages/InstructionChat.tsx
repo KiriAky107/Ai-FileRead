@@ -1,26 +1,10 @@
 import React, { useState, useRef, useEffect } from 'react';
-import {
-  Send,
-  Bot,
-  User,
-  Sparkles,
-  Trash2,
-  RefreshCcw,
-  FileText,
-  TableProperties,
-  ChevronRight,
-  ArrowRight,
-  Loader2,
-  Download,
-  Search,
-  MessageSquare,
-  CheckCircle
-} from 'lucide-react';
+import { Send, Bot, User, Sparkles, Trash2, FileText, TableProperties, ArrowRight, Search, MessageSquare } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { ScrollArea } from '@/components/ui/scroll-area';
-import { Badge } from '@/components/ui/badge';
+import { Markdown } from '@/components/ui/markdown';
 import { backendApi } from '@/db/backend-api';
 import { toast } from 'sonner';
 import { cn } from '@/lib/utils';
@@ -39,7 +23,20 @@ const InstructionChat: React.FC = () => {
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
   const [currentDocIds, setCurrentDocIds] = useState<string[]>([]);
+  const [conversationId, setConversationId] = useState<string>('');
   const scrollAreaRef = useRef<HTMLDivElement>(null);
+
+  // 初始化会话ID
+  useEffect(() => {
+    const storedId = localStorage.getItem('chat_conversation_id');
+    if (storedId) {
+      setConversationId(storedId);
+    } else {
+      const newId = `conv_${Date.now()}_${Math.random().toString(36).substring(7)}`;
+      setConversationId(newId);
+      localStorage.setItem('chat_conversation_id', newId);
+    }
+  }, []);
 
   useEffect(() => {
     // Initial welcome message
@@ -119,7 +116,8 @@ const InstructionChat: React.FC = () => {
       // 使用真实的智能指令 API
       const response = await backendApi.instructionChat(
         input.trim(),
-        currentDocIds.length > 0 ? currentDocIds : undefined
+        currentDocIds.length > 0 ? currentDocIds : undefined,
+        { conversation_id: conversationId }
       );
 
       // 根据意图类型生成友好响应
@@ -135,11 +133,12 @@ const InstructionChat: React.FC = () => {
             responseContent = `✅ 已提取到 ${keys.length} 个字段的数据：\n\n`;
             for (const [key, value] of Object.entries(extracted)) {
               const values = Array.isArray(value) ? value : [value];
-              responseContent += `**${key}**: ${values.slice(0, 3).join(', ')}${values.length > 3 ? '...' : ''}\n`;
+              const displayValues = values.length > 10 ? values.slice(0, 10).join(', ') + ` ...（共${values.length}条）` : values.join(', ');
+              responseContent += `**${key}**: ${displayValues}\n`;
             }
-            responseContent += `\n💡 您可以将这些数据填入表格。`;
+            responseContent += `\n💡 可直接使用以上数据，或说"填入表格"继续填表操作。`;
           } else {
-            responseContent = '未能从文档中提取到相关数据。请尝试更明确的字段名称。';
+            responseContent = resultData?.message || '未能从文档中提取到相关数据。请尝试更明确的字段名称。';
           }
           break;
 
@@ -151,24 +150,24 @@ const InstructionChat: React.FC = () => {
             responseContent = `✅ 填表完成！成功填写 ${filledKeys.length} 个字段：\n\n`;
             for (const [key, value] of Object.entries(filled)) {
               const values = Array.isArray(value) ? value : [value];
-              responseContent += `**${key}**: ${values.slice(0, 3).join(', ')}\n`;
+              const displayValues = values.length > 10 ? values.slice(0, 10).join(', ') + ` ...（共${values.length}条）` : values.join(', ');
+              responseContent += `**${key}**: ${displayValues}\n`;
             }
             responseContent += `\n📋 请到【智能填表】页面查看或导出结果。`;
           } else {
-            responseContent = '填表未能提取到数据。请检查模板表头和数据源内容。';
+            responseContent = resultData?.message || '填表未能提取到数据。请检查模板表头和数据源内容。';
           }
           break;
 
         case 'summarize':
           // 摘要结果
-          const summaries = resultData?.summaries || [];
-          if (summaries.length > 0) {
-            responseContent = `📄 找到 ${summaries.length} 个文档的摘要：\n\n`;
-            summaries.forEach((s: any, idx: number) => {
-              responseContent += `**${idx + 1}. ${s.filename}**\n${s.content_preview}\n\n`;
-            });
+          if (resultData?.action_needed === 'provide_document' || resultData?.action_needed === 'upload_document') {
+            responseContent = `📋 ${resultData.message}\n\n${resultData.suggestion || ''}`;
+          } else if (resultData?.ai_summary) {
+            // AI 生成的摘要
+            responseContent = `📄 **${resultData.filename}** 摘要分析：\n\n${resultData.ai_summary}`;
           } else {
-            responseContent = '未能生成摘要。请确保已上传文档。';
+            responseContent = resultData?.message || '未能生成摘要。请确保已上传文档。';
           }
           break;
 
@@ -176,8 +175,10 @@ const InstructionChat: React.FC = () => {
           // 问答结果
           if (resultData?.answer) {
             responseContent = `**问题**: ${resultData.question}\n\n**答案**: ${resultData.answer}`;
+          } else if (resultData?.context_preview) {
+            responseContent = `**问题**: ${resultData.question}\n\n**相关上下文**：\n${resultData.context_preview}`;
           } else {
-            responseContent = resultData?.message || '我找到了相关信息，请查看上文。';
+            responseContent = resultData?.message || '请先上传文档，我才能回答您的问题。';
           }
           break;
 
@@ -207,8 +208,35 @@ const InstructionChat: React.FC = () => {
           }
           break;
 
+        case 'edit':
+          // 文档编辑结果
+          if (resultData?.edited_content) {
+            responseContent = `✏️ **${resultData.original_filename}** 编辑完成：\n\n${resultData.edited_content.substring(0, 500)}${resultData.edited_content.length > 500 ? '\n\n...(内容已截断)' : ''}`;
+          } else {
+            responseContent = resultData?.message || '编辑完成。';
+          }
+          break;
+
+        case 'transform':
+          // 格式转换结果
+          if (resultData?.excel_data) {
+            responseContent = `🔄 格式转换完成！\n\n已转换为 **Excel** 格式，共 **${resultData.excel_data.length}** 行数据。\n\n${resultData.message || ''}`;
+          } else if (resultData?.content) {
+            responseContent = `🔄 格式转换完成！\n\n目标格式: **${resultData.target_format?.toUpperCase()}**\n\n${resultData.message || ''}`;
+          } else {
+            responseContent = resultData?.message || '格式转换完成。';
+          }
+          break;
+
         case 'unknown':
-          responseContent = `我理解您想要： "${input.trim()}"\n\n但我目前无法完成此操作。您可以尝试：\n\n1. **提取数据**: "提取医院数量和床位数"\n2. **填表**: "根据这些数据填表"\n3. **总结**: "总结这份文档"\n4. **问答**: "文档里说了什么？"\n5. **搜索**: "搜索相关内容"`;
+          // 检查是否需要用户上传文档
+          if (resultData?.suggestion) {
+            responseContent = resultData.suggestion;
+          } else if (resultData?.message && resultData.message !== '无法理解该指令，请尝试更明确的描述') {
+            responseContent = resultData.message;
+          } else {
+            responseContent = `我理解您想要： "${input.trim()}"\n\n请尝试以下操作：\n\n1. **提取数据**: "提取医院数量和床位数"\n2. **填表**: "根据这些数据填表"\n3. **总结**: "总结这份文档"\n4. **问答**: "文档里说了什么？"\n5. **搜索**: "搜索相关内容"`;
+          }
           break;
 
         default:
@@ -299,9 +327,11 @@ const InstructionChat: React.FC = () => {
                       ? "bg-primary text-primary-foreground shadow-xl shadow-primary/20 rounded-tr-none"
                       : "bg-white border border-border/50 shadow-md rounded-tl-none"
                   )}>
-                    <p className="text-sm leading-relaxed whitespace-pre-wrap font-medium">
-                      {m.content}
-                    </p>
+                    {m.role === 'assistant' ? (
+                      <Markdown content={m.content} className="text-sm leading-relaxed prose prose-sm max-w-none" />
+                    ) : (
+                      <p className="text-sm leading-relaxed whitespace-pre-wrap font-medium">{m.content}</p>
+                    )}
                     <span className={cn(
                       "text-[10px] block opacity-50 font-bold tracking-widest",
                       m.role === 'user' ? "text-right" : "text-left"

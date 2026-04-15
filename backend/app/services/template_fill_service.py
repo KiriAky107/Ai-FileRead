@@ -5,6 +5,7 @@
 """
 import asyncio
 import logging
+import re
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
@@ -13,6 +14,7 @@ from app.services.llm_service import llm_service
 from app.core.document_parser import ParserFactory
 from app.services.markdown_ai_service import markdown_ai_service
 from app.services.rag_service import rag_service
+from app.services.excel_storage_service import excel_storage_service
 
 logger = logging.getLogger(__name__)
 
@@ -105,11 +107,59 @@ class TemplateFillService:
 
         # 3. 检查是否需要使用源文档重新生成表头
         # 条件：源文档已加载 AND 现有字段看起来是自动生成的（如"字段1"、"字段2"）
+        # 注意：Word 模板（docx）不自动重新生成表头，因为 Word 模板的表结构由用户定义，必须保留
         needs_regenerate_headers = (
+            template_file_type != "docx" and
             len(source_docs) > 0 and
             len(template_fields) > 0 and
             all(self._is_auto_generated_field(f.name) for f in template_fields)
         )
+
+        # 4. Word 模板特殊处理：表头为空时，从源文档生成字段
+        # 仅当有源文档、模板字段为空、模板文件类型为 docx 时触发
+        if not needs_regenerate_headers and template_file_type == "docx" and len(source_docs) > 0 and len(template_fields) == 0:
+            logger.info(f"Word 模板表头为空，从源文档生成字段... (source_docs={len(source_docs)})")
+            source_contents = []
+            for doc in source_docs:
+                structured = doc.structured_data if doc.structured_data else {}
+                titles = structured.get("titles", [])
+                tables = structured.get("tables", [])
+                tables_count = len(tables) if tables else 0
+                tables_summary = ""
+                if tables:
+                    tables_summary = "\n【文档中的表格】:\n"
+                    for idx, table in enumerate(tables[:5]):
+                        if isinstance(table, dict):
+                            headers = table.get("headers", [])
+                            rows = table.get("rows", [])
+                            if headers:
+                                tables_summary += f"表格{idx+1}表头: {', '.join(str(h) for h in headers)}\n"
+                            if rows:
+                                tables_summary += f"表格{idx+1}前3行: "
+                                for row_idx, row in enumerate(rows[:3]):
+                                    if isinstance(row, list):
+                                        tables_summary += " | ".join(str(c) for c in row) + "; "
+                                    elif isinstance(row, dict):
+                                        tables_summary += " | ".join(str(row.get(h, "")) for h in headers if headers) + "; "
+                                tables_summary += "\n"
+                source_contents.append({
+                    "filename": doc.filename,
+                    "doc_type": doc.doc_type,
+                    "content": doc.content[:5000] if doc.content else "",
+                    "titles": titles[:10] if titles else [],
+                    "tables_count": tables_count,
+                    "tables_summary": tables_summary
+                })
+            if template_id:
+                generated_fields = await self.get_template_fields_from_file(
+                    template_id,
+                    template_file_type,
+                    source_contents=source_contents,
+                    source_docs=source_docs
+                )
+                if generated_fields:
+                    template_fields = generated_fields
+                    logger.info(f"Word 模板字段生成成功: {[f.name for f in template_fields]}")
 
         if needs_regenerate_headers:
             logger.info(f"检测到自动生成表头，尝试使用源文档重新生成... (当前字段: {[f.name for f in template_fields]})")
@@ -162,7 +212,8 @@ class TemplateFillService:
                 new_fields = await self.get_template_fields_from_file(
                     template_id,
                     template_file_type,
-                    source_contents=source_contents
+                    source_contents=source_contents,
+                    source_docs=source_docs
                 )
                 if new_fields and len(new_fields) > 0:
                     logger.info(f"成功重新生成表头: {[f.name for f in new_fields]}")
@@ -224,13 +275,356 @@ class TemplateFillService:
         max_rows = max(len(v) for v in filled_data.values()) if filled_data else 1
         logger.info(f"填表完成: {len(filled_data)} 个字段, 最大行数: {max_rows}")
 
+        # 如果是 Word 模板，将数据填入模板文件
+        filled_file_path = None
+        if template_file_type == "docx" and template_id and filled_data:
+            filled_file_path = await self._fill_docx(template_id, filled_data)
+            if filled_file_path:
+                logger.info(f"Word 模板已填写，输出文件: {filled_file_path}")
+
         return {
             "success": True,
             "filled_data": filled_data,
             "fill_details": fill_details,
             "source_doc_count": len(source_docs),
-            "max_rows": max_rows
+            "max_rows": max_rows,
+            "filled_file_path": filled_file_path
         }
+
+    async def _polish_word_filled_data(
+        self,
+        filled_data: Dict[str, Any]
+    ) -> Dict[str, str]:
+        """
+        将提取的结构化数据（尤其是多行Excel数据）进行统计归纳，
+        然后润色为自然语言文本
+
+        Args:
+            filled_data: {字段名: [原始值列表]}
+
+        Returns:
+            {字段名: 润色后的文本}
+        """
+        if not filled_data:
+            return {}
+
+        try:
+            import json
+
+            # 第一步：对数值型多行数据进行统计分析
+            data_summary = []
+            for field_name, values in filled_data.items():
+                if not isinstance(values, list) or not values:
+                    continue
+
+                # 过滤掉无效值
+                raw_values = []
+                for v in values:
+                    if v and str(v).strip() and not str(v).startswith('[提取失败'):
+                        raw_values.append(str(v).strip())
+
+                if not raw_values:
+                    continue
+
+                # 尝试解析为数值进行统计
+                numeric_values = []
+                for v in raw_values:
+                    # 提取数值（处理 "123个"、"78.5%"、"1,234" 等格式）
+                    num_str = re.sub(r'[^\d.\-]', '', str(v))
+                    try:
+                        if num_str and num_str != '-' and num_str != '.':
+                            numeric_values.append(float(num_str))
+                    except ValueError:
+                        pass
+
+                # 根据字段名判断类型
+                field_lower = field_name.lower()
+                is_count_field = any(kw in field_lower for kw in ['数量', '总数', '次数', '条数', '订单数', '记录数', '条目'])
+                is_amount_field = any(kw in field_lower for kw in ['金额', '总额', '合计', '总计', '销售额', '收入', '支出', '成本'])
+                is_ratio_field = any(kw in field_lower for kw in ['比率', '比例', '占比', '率', '使用率', '增长', '增幅'])
+                is_name_field = any(kw in field_lower for kw in ['名称', '机构', '医院', '公司', '单位', '部门', '区域', '类别'])
+
+                if len(numeric_values) >= 2 and len(numeric_values) == len(raw_values):
+                    # 多行数值数据，进行统计归纳
+                    total = sum(numeric_values)
+                    avg = total / len(numeric_values)
+                    max_val = max(numeric_values)
+                    min_val = min(numeric_values)
+
+                    stats_lines = [
+                        f"【{field_name}】（共 {len(raw_values)} 条数据）:",
+                        f"  - 合计: {self._format_number(total)}" if is_amount_field else f"  - 合计: {total:.2f}",
+                        f"  - 平均: {avg:.2f}",
+                        f"  - 最大: {max_val:.2f}",
+                        f"  - 最小: {min_val:.2f}",
+                    ]
+
+                    # 对原始值去重计数（如果是名称类字段）
+                    if is_name_field:
+                        unique_values = list(set(raw_values))
+                        if len(unique_values) <= 10:
+                            stats_lines.append(f"  - 涉及类别（共 {len(unique_values)} 种）: {'、'.join(unique_values[:8])}")
+                        else:
+                            stats_lines.append(f"  - 涉及 {len(unique_values)} 个不同类别")
+
+                    # 取前5个原始示例
+                    stats_lines.append(f"  - 示例值: {'、'.join(raw_values[:5])}")
+                    data_summary.append('\n'.join(stats_lines))
+
+                elif is_ratio_field and len(numeric_values) == 1:
+                    # 单值百分比
+                    pct = numeric_values[0]
+                    data_summary.append(f"【{field_name}】: {pct:.1f}%，表示相关指标的相对水平")
+
+                elif is_amount_field and len(numeric_values) >= 1:
+                    # 金额类（单位通常是万元/亿元）
+                    total = sum(numeric_values)
+                    unit = ""
+                    if total >= 10000:
+                        unit = f"（约 {total/10000:.2f} 万元）"
+                    elif total >= 1:
+                        unit = f"（约 {total:.2f} 元）"
+                    data_summary.append(f"【{field_name}】: 合计 {self._format_number(total)}{unit}，基于 {len(raw_values)} 条记录汇总")
+
+                elif is_count_field and len(numeric_values) >= 1:
+                    # 数量类
+                    total = sum(numeric_values)
+                    data_summary.append(f"【{field_name}】: 共 {self._format_number(total)}，基于 {len(raw_values)} 条记录汇总")
+
+                else:
+                    # 无法归类的多值数据，做去重归纳
+                    unique_values = list(set(raw_values))
+                    if len(unique_values) <= 8:
+                        data_summary.append(f"【{field_name}】（共 {len(raw_values)} 条，去重后 {len(unique_values)} 项）: {'、'.join(unique_values[:8])}")
+                    elif len(raw_values) > 8:
+                        data_summary.append(f"【{field_name}】（共 {len(raw_values)} 条记录）: {'、'.join(raw_values[:5])} 等")
+                    else:
+                        data_summary.append(f"【{field_name}】: {'、'.join(raw_values)}")
+
+            if not data_summary:
+                return {k: (', '.join(str(v) for v in vals[:5]) if isinstance(vals, list) else str(vals))
+                        for k, vals in filled_data.items()}
+
+            # 第二步：调用 LLM 将统计分析结果转化为专业自然语言描述
+            prompt = f"""你是一个专业的数据分析报告助手。请根据以下从文档中提取并统计的数据，生成专业、简洁的自然语言描述。
+
+【数据统计结果】：
+{chr(10).join(data_summary)}
+
+【润色要求】：
+1. 每个字段生成一段专业的描述性文本（20-60字）
+2. 数值类字段要明确标注单位和含义，如"销售总额达1,234.5万元，共涵盖56个订单"
+3. 分类/名称类字段要归纳总结类别，如"涉及医疗器械、药品采购、设备维修等5个业务类别"
+4. 多值数据不要简单罗列，要做总结，如"覆盖华东地区（上海、江苏、浙江）、华南地区（广东）等6个省市的销售网络"
+5. 百分比/比率类要加背景说明，如"综合毛利率为23.5%，处于行业正常水平"
+6. 保持文本通顺、专业，符合正式报告风格
+7. 每段控制在60字以内
+
+【输出格式】（严格按JSON格式，只返回JSON，不要任何其他内容）：
+{{
+    "字段名1": "润色后的描述文本1",
+    "字段名2": "润色后的描述文本2"
+}}
+"""
+            messages = [
+                {"role": "system", "content": "你是一个专业的数据分析报告助手。请严格按JSON格式输出，只返回纯JSON，不要任何其他内容。"},
+                {"role": "user", "content": prompt}
+            ]
+
+            response = await self.llm.chat(
+                messages=messages,
+                temperature=0.3,
+                max_tokens=3000
+            )
+            content = self.llm.extract_message_content(response)
+            logger.info(f"LLM 润色 Word 数据返回: {content[:500]}")
+
+            # 尝试解析 JSON
+            json_match = re.search(r'\{[\s\S]*\}', content)
+            if json_match:
+                polished = json.loads(json_match.group())
+                logger.info(f"LLM 润色成功: {len(polished)} 个字段")
+                return polished
+            else:
+                logger.warning(f"LLM 返回无法解析为 JSON: {content[:200]}")
+                # 回退到原始统计摘要
+                return {k: (', '.join(str(v) for v in vals[:5]) if isinstance(vals, list) else str(vals))
+                        for k, vals in filled_data.items()}
+
+        except Exception as e:
+            logger.error(f"LLM 润色失败: {str(e)}")
+            # 润色失败时回退到原始值
+            return {k: (', '.join(str(v) for v in vals[:5]) if isinstance(vals, list) else str(vals))
+                    for k, vals in filled_data.items()}
+
+    def _format_number(self, num: float) -> str:
+        """格式化数字，添加千分位"""
+        if abs(num) >= 10000:
+            return f"{num:,.2f}"
+        elif abs(num) >= 1:
+            return f"{num:,.2f}"
+        else:
+            return f"{num:.4f}"
+
+    async def _fill_docx(
+        self,
+        template_path: str,
+        filled_data: Dict[str, Any]
+    ) -> Optional[str]:
+        """
+        将提取的数据填入 Word 模板
+
+        Args:
+            template_path: Word 模板文件路径
+            filled_data: 字段值字典 {field_name: [values]}
+
+        Returns:
+            填写后的文件路径，失败返回 None
+        """
+        import re
+        import os
+        import tempfile
+        import shutil
+        from docx import Document
+        from docx.shared import RGBColor
+
+        def clean_text(text: str) -> str:
+            """清理文本，移除非法字符"""
+            if not text:
+                return ""
+            # 移除控制字符
+            text = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]', '', text)
+            # 移除 Word 中常见的非法替代字符（显示为方框）
+            text = re.sub(r'[\ufffd\u25a1\u25a9\u2610\u2611\u25cb\u25c9]', '', text)
+            # 移除其他无效 Unicode 字符
+            text = re.sub(r'[\ufeff\u200b-\u200f\u2028-\u202e]', '', text)
+            return text.strip()
+
+        def set_cell_text(cell, text: str):
+            """设置单元格文本（保留原有格式）"""
+            cell.text = text
+            # 确保文本颜色为黑色
+            for para in cell.paragraphs:
+                for run in para.runs:
+                    run.font.color.rgb = RGBColor(0, 0, 0)
+
+        try:
+            # 先对数据进行 LLM 润色（非结构化文本补充和润色）
+            logger.info(f"Word 填写前开始 LLM 润色 {len(filled_data)} 个字段...")
+            polished_data = await self._polish_word_filled_data(filled_data)
+            logger.info(f"LLM 润色完成，使用润色后文本写入 Word")
+
+            # 创建临时目录存放修改后的文件
+            temp_dir = tempfile.mkdtemp()
+            output_path = os.path.join(temp_dir, "filled_template.docx")
+
+            # 复制模板到临时文件
+            shutil.copy2(template_path, output_path)
+
+            # 打开复制的模板
+            doc = Document(output_path)
+
+            matched_fields = set()
+
+            # 遍历表格，找到字段名所在的行，填写对应值
+            for table in doc.tables:
+                for row in table.rows:
+                    cells = row.cells
+                    if not cells:
+                        continue
+
+                    first_cell_text = cells[0].text.strip()
+                    if not first_cell_text:
+                        continue
+
+                    # 精确匹配字段名
+                    if first_cell_text in polished_data:
+                        display_text = polished_data[first_cell_text]
+                        if display_text:
+                            if len(cells) > 1:
+                                set_cell_text(cells[1], clean_text(display_text))
+                            matched_fields.add(first_cell_text)
+                        logger.info(f"Word 填写（精确）: {first_cell_text} = {display_text[:50] if display_text else ''}")
+                        continue
+
+                    # 前缀/后缀匹配
+                    for field_name, display_text in polished_data.items():
+                        if field_name and first_cell_text and (
+                            field_name.startswith(first_cell_text) or first_cell_text.startswith(field_name)
+                        ):
+                            if display_text:
+                                if len(cells) > 1:
+                                    set_cell_text(cells[1], clean_text(display_text))
+                                matched_fields.add(field_name)
+                            logger.info(f"Word 填写（模糊）: {first_cell_text} ≈ {field_name} = {display_text[:50] if display_text else ''}")
+                            break
+
+            # 如果有未匹配的字段（模板第一列为空），使用段落格式写入（带分隔线，更清晰）
+            unmatched_fields = [f for f in polished_data if f not in matched_fields]
+            if unmatched_fields:
+                logger.info(f"使用段落格式写入 {len(unmatched_fields)} 个字段（带分隔线）")
+
+                from docx.oxml.ns import qn
+                from docx.oxml import OxmlElement
+                from docx.shared import Pt, RGBColor
+
+                def add_horizontal_separator(doc, before_para=None):
+                    """添加水平分隔线（通过段落下边框实现）"""
+                    sep_para = OxmlElement('w:p')
+                    pPr = OxmlElement('w:pPr')
+                    pBdr = OxmlElement('w:pBdr')
+                    bottom = OxmlElement('w:bottom')
+                    bottom.set(qn('w:val'), 'single')
+                    bottom.set(qn('w:sz'), '6')
+                    bottom.set(qn('w:space'), '1')
+                    bottom.set(qn('w:color'), 'CCCCCC')
+                    pBdr.append(bottom)
+                    pPr.append(pBdr)
+                    sep_para.append(pPr)
+                    if before_para is not None:
+                        before_para._element.addprevious(sep_para)
+                    else:
+                        doc._body.append(sep_para)
+
+                def add_field_section(doc, field_name: str, display_text: str):
+                    """添加一个字段区域：字段名（加粗）+ 值段落 + 分隔线"""
+                    from docx.shared import Pt
+
+                    # 字段名段落（加粗）
+                    name_para = doc.add_paragraph()
+                    name_run = name_para.add_run(f"📌 {field_name}")
+                    name_run.bold = True
+                    name_run.font.size = Pt(11)
+                    name_run.font.color.rgb = RGBColor(0, 51, 102)
+                    name_para.paragraph_format.space_before = Pt(12)
+                    name_para.paragraph_format.space_after = Pt(3)
+
+                    # 值段落
+                    value_para = doc.add_paragraph()
+                    value_run = value_para.add_run(display_text)
+                    value_run.font.size = Pt(10.5)
+                    value_run.font.color.rgb = RGBColor(51, 51, 51)
+                    value_para.paragraph_format.space_before = Pt(0)
+                    value_para.paragraph_format.space_after = Pt(6)
+
+                    # 分隔线
+                    add_horizontal_separator(doc, value_para)
+
+                # 在文档末尾添加各字段段落
+                for field_name in unmatched_fields:
+                    display_text = polished_data[field_name]
+                    if display_text:
+                        add_field_section(doc, field_name, clean_text(display_text))
+                        logger.info(f"Word 段落写入: {field_name} = {display_text[:60]}")
+
+            # 保存修改后的文档
+            doc.save(output_path)
+            logger.info(f"Word 模板填写完成: {output_path}, 匹配字段: {len(matched_fields)}, 追加字段: {len(unmatched_fields)}")
+            return output_path
+
+        except Exception as e:
+            logger.error(f"Word 模板填写失败: {str(e)}")
+            return None
 
     async def _load_source_documents(
         self,
@@ -257,10 +651,38 @@ class TemplateFillService:
                     if doc:
                         sd = doc.get("structured_data", {})
                         sd_keys = list(sd.keys()) if sd else []
-                        logger.info(f"从MongoDB加载文档: {doc_id}, doc_type={doc.get('doc_type')}, structured_data keys={sd_keys}")
+                        doc_type = doc.get("doc_type", "")
+                        mysql_table_name = doc.get("metadata", {}).get("mysql_table_name")
+                        logger.info(f"从MongoDB加载文档: {doc_id}, doc_type={doc_type}, structured_data keys={sd_keys}, mysql_table={mysql_table_name}")
 
-                        # 如果 structured_data 为空，但有 file_path，尝试重新解析文件
                         doc_content = doc.get("content", "")
+
+                        # 如果是 Excel 类型且有 MySQL 表名，直接从 MySQL 加载数据
+                        if doc_type in ["xlsx", "xls"] and mysql_table_name:
+                            try:
+                                logger.info(f"  从 MySQL 表 {mysql_table_name} 加载 Excel 数据")
+                                mysql_data = await excel_storage_service.query_table(mysql_table_name, limit=1000)
+                                if mysql_data:
+                                    # 转换为 SourceDocument 格式
+                                    if mysql_data and len(mysql_data) > 0:
+                                        columns = list(mysql_data[0].keys()) if mysql_data else []
+                                        rows = [[row.get(col) for col in columns] for row in mysql_data]
+                                        sd = {
+                                            "headers": columns,
+                                            "rows": rows,
+                                            "row_count": len(mysql_data),
+                                            "column_count": len(columns),
+                                            "source": "mysql"
+                                        }
+                                        logger.info(f"  MySQL 数据加载成功: {len(mysql_data)} 行, {len(columns)} 列")
+                                    else:
+                                        logger.warning(f"  MySQL 表 {mysql_table_name} 无数据")
+                                else:
+                                    logger.warning(f"  MySQL 表 {mysql_table_name} 查询无结果")
+                            except Exception as mysql_err:
+                                logger.error(f"  MySQL 加载失败: {str(mysql_err)}")
+
+                        # 如果 structured_data 仍然为空，尝试重新解析文件
                         if not sd or (not sd.get("tables") and not sd.get("headers") and not sd.get("rows")):
                             file_path = doc.get("metadata", {}).get("file_path")
                             if file_path:
@@ -294,7 +716,7 @@ class TemplateFillService:
                         source_docs.append(SourceDocument(
                             doc_id=doc_id,
                             filename=doc.get("metadata", {}).get("original_filename", "unknown"),
-                            doc_type=doc.get("doc_type", "unknown"),
+                            doc_type=doc_type,
                             content=doc_content,
                             structured_data=sd
                         ))
@@ -1047,7 +1469,8 @@ class TemplateFillService:
         self,
         file_path: str,
         file_type: str = "xlsx",
-        source_contents: List[dict] = None
+        source_contents: List[dict] = None,
+        source_docs: List["SourceDocument"] = None
     ) -> List[TemplateField]:
         """
         从模板文件提取字段定义
@@ -1071,15 +1494,18 @@ class TemplateFillService:
                 fields = await self._get_template_fields_from_docx(file_path)
 
             # 检查是否需要 AI 生成表头
-            # 条件：没有字段 OR 所有字段都是自动命名的（如"字段1"、"列1"、"Unnamed"开头）
+            # 条件：没有字段 OR 所有字段都是自动命名的
+            # 对于 docx：仅当有源文档时才允许 AI 生成（避免覆盖用户定义的表头）
             needs_ai_generation = (
-                len(fields) == 0 or
-                all(self._is_auto_generated_field(f.name) for f in fields)
+                (len(fields) == 0 or
+                all(self._is_auto_generated_field(f.name) for f in fields))
+            ) and (
+                file_type != "docx" or len(source_contents) > 0
             )
 
             if needs_ai_generation:
                 logger.info(f"模板表头为空或自动生成，尝试 AI 生成表头... (fields={len(fields)}, source_docs={len(source_contents)})")
-                ai_fields = await self._generate_fields_with_ai(file_path, file_type, source_contents)
+                ai_fields = await self._generate_fields_with_ai(file_path, file_type, source_contents, source_docs)
                 if ai_fields:
                     fields = ai_fields
                     logger.info(f"AI 生成表头成功: {len(fields)} 个字段")
@@ -2134,7 +2560,8 @@ class TemplateFillService:
         self,
         file_path: str,
         file_type: str,
-        source_contents: List[dict] = None
+        source_contents: List[dict] = None,
+        source_docs: List["SourceDocument"] = None
     ) -> Optional[List[TemplateField]]:
         """
         使用 AI 为空表生成表头字段
@@ -2148,6 +2575,8 @@ class TemplateFillService:
         Returns:
             生成的字段列表，如果失败返回 None
         """
+        import random
+
         try:
             import pandas as pd
 
@@ -2182,24 +2611,21 @@ class TemplateFillService:
                     else:
                         content_sample = ""
 
-            # 调用 AI 生成表头
-            # 根据源文档内容生成表头
-            source_info = ""
-            logger.info(f"[DEBUG] _generate_fields_with_ai received source_contents: {len(source_contents) if source_contents else 0} items")
+            # 优先从源文档的表格表头中随机选取
             if source_contents:
-                for sc in source_contents:
-                    logger.info(f"[DEBUG]   source doc: filename={sc.get('filename')}, content_len={len(sc.get('content', ''))}, titles={len(sc.get('titles', []))}, tables_count={sc.get('tables_count', 0)}, has_tables_summary={bool(sc.get('tables_summary'))}")
-                source_info = "\n\n【源文档内容摘要】（根据以下文档内容生成表头）：\n"
+                import re
+                all_headers = []
+                source_info = ""
+
                 for idx, src in enumerate(source_contents[:5]):  # 最多5个源文档
                     filename = src.get("filename", f"文档{idx+1}")
                     doc_type = src.get("doc_type", "unknown")
-                    content = src.get("content", "")[:3000]  # 限制内容长度
-                    titles = src.get("titles", [])[:10]  # 最多10个标题
+                    content = src.get("content", "")[:3000]
+                    titles = src.get("titles", [])[:10]
                     tables_count = src.get("tables_count", 0)
                     tables_summary = src.get("tables_summary", "")
 
                     source_info += f"\n--- 文档 {idx+1}: {filename} ({doc_type}) ---\n"
-                    # 处理 titles（可能是字符串列表或字典列表）
                     if titles:
                         title_texts = []
                         for t in titles[:5]:
@@ -2215,6 +2641,72 @@ class TemplateFillService:
                         source_info += f"{tables_summary}\n"
                     if content:
                         source_info += f"【文档内容】（前3000字符）：{content[:3000]}\n"
+
+                    # 从 tables_summary 中提取表头
+                    # 表格摘要格式如: "表格1表头: 姓名, 年龄, 性别"
+                    if tables_summary:
+                        header_matches = re.findall(r'表头:\s*([^\n]+)', tables_summary)
+                        for match in header_matches:
+                            # 分割表头字符串
+                            headers = [h.strip() for h in match.split(',') if h.strip()]
+                            all_headers.extend(headers)
+                            logger.info(f"从表格摘要提取到表头: {headers}")
+
+                # 从源文档的 structured_data 中直接提取表头（Excel 等数据源）
+                for doc in source_docs:
+                    if doc.structured_data:
+                        sd = doc.structured_data
+                        # Excel 格式: {columns: [...], rows: [...]}
+                        if sd.get("columns"):
+                            cols = sd.get("columns", [])
+                            if isinstance(cols, list) and cols:
+                                all_headers.extend([str(c) for c in cols if str(c).strip()])
+                                logger.info(f"从 structured_data.columns 提取到表头: {cols}")
+                        # 多 sheet 格式: {sheets: {sheet_name: {columns, rows}}}
+                        if sd.get("sheets"):
+                            for sheet_name, sheet_data in sd.get("sheets", {}).items():
+                                if isinstance(sheet_data, dict) and sheet_data.get("columns"):
+                                    cols = sheet_data.get("columns", [])
+                                    if isinstance(cols, list) and cols:
+                                        all_headers.extend([str(c) for c in cols if str(c).strip()])
+                                        logger.info(f"从 sheets.{sheet_name} 提取到表头: {cols}")
+                        # Markdown/表格格式: {tables: [{headers, rows}]}
+                        if sd.get("tables") and isinstance(sd.get("tables"), list):
+                            for table in sd.get("tables", []):
+                                if isinstance(table, dict) and table.get("headers"):
+                                    headers = table.get("headers", [])
+                                    if isinstance(headers, list) and headers:
+                                        all_headers.extend([str(h) for h in headers if str(h).strip()])
+                                        logger.info(f"从 tables 提取到表头: {headers}")
+                        # 另一种格式: {headers, rows}
+                        if sd.get("headers") and sd.get("rows"):
+                            headers = sd.get("headers", [])
+                            if isinstance(headers, list) and headers:
+                                all_headers.extend([str(h) for h in headers if str(h).strip()])
+                                logger.info(f"从 headers/rows 提取到表头: {headers}")
+
+                # 如果从表格摘要中获取到了表头，随机选取一部分
+                if all_headers:
+                    logger.info(f"共有 {len(all_headers)} 个表头可用")
+                    # 随机选取 5-7 个表头
+                    num_fields = min(random.randint(5, 7), len(all_headers))
+                    selected_headers = random.sample(all_headers, num_fields)
+                    logger.info(f"随机选取的表头: {selected_headers}")
+
+                    fields = []
+                    for idx, header in enumerate(selected_headers):
+                        fields.append(TemplateField(
+                            cell=self._column_to_cell(idx),
+                            name=header,
+                            field_type="text",
+                            required=False,
+                            hint=""
+                        ))
+                    return fields
+            else:
+                source_info = ""
+
+            # 如果无法从表格表头获取，才调用 AI 生成
 
             prompt = f"""你是一个专业的数据分析助手。请分析源文档中的所有数据，生成表格表头字段。
 

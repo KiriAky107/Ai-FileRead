@@ -781,7 +781,8 @@ export const backendApi = {
   async exportFilledTemplate(
     templateId: string,
     filledData: Record<string, any>,
-    format: 'xlsx' | 'docx' = 'xlsx'
+    format: 'xlsx' | 'docx' = 'xlsx',
+    filledFilePath?: string
   ): Promise<Blob> {
     const url = `${BACKEND_BASE_URL}/templates/export`;
 
@@ -793,6 +794,7 @@ export const backendApi = {
           template_id: templateId,
           filled_data: filledData,
           format,
+          ...(filledFilePath && { filled_file_path: filledFilePath }),
         }),
       });
 
@@ -964,6 +966,101 @@ export const backendApi = {
       throw error;
     }
   },
+
+  // ==================== 智能指令 API ====================
+
+  /**
+   * 智能对话（支持多轮对话的指令执行）
+   */
+  async instructionChat(
+    instruction: string,
+    docIds?: string[],
+    context?: Record<string, any>
+  ): Promise<{
+    success: boolean;
+    intent: string;
+    result: Record<string, any>;
+    message: string;
+    hint?: string;
+  }> {
+    const url = `${BACKEND_BASE_URL}/instruction/chat`;
+
+    try {
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ instruction, doc_ids: docIds, context }),
+      });
+
+      if (!response.ok) {
+        const error = await response.json();
+        throw new Error(error.detail || '对话处理失败');
+      }
+
+      return await response.json();
+    } catch (error) {
+      console.error('对话处理失败:', error);
+      throw error;
+    }
+  },
+
+  /**
+   * 获取支持的指令类型列表
+   */
+  async getSupportedIntents(): Promise<{
+    intents: Array<{
+      intent: string;
+      name: string;
+      examples: string[];
+      params: string[];
+    }>;
+  }> {
+    const url = `${BACKEND_BASE_URL}/instruction/intents`;
+
+    try {
+      const response = await fetch(url);
+      if (!response.ok) throw new Error('获取指令列表失败');
+      return await response.json();
+    } catch (error) {
+      console.error('获取指令列表失败:', error);
+      throw error;
+    }
+  },
+
+  /**
+   * 执行指令（同步模式）
+   */
+  async executeInstruction(
+    instruction: string,
+    docIds?: string[],
+    context?: Record<string, any>
+  ): Promise<{
+    success: boolean;
+    intent: string;
+    result: Record<string, any>;
+    message: string;
+  }> {
+    const url = `${BACKEND_BASE_URL}/instruction/execute`;
+
+    try {
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ instruction, doc_ids: docIds, context }),
+      });
+
+      if (!response.ok) {
+        const error = await response.json();
+        throw new Error(error.detail || '指令执行失败');
+      }
+
+      return await response.json();
+    } catch (error) {
+      console.error('指令执行失败:', error);
+      throw error;
+    }
+  },
+
 };
 
 // ==================== AI 分析 API ====================
@@ -1529,61 +1626,66 @@ export const aiApi = {
     }
   },
 
+  // ==================== 对话历史 API ====================
+
   /**
-   * 智能对话（支持多轮对话的指令执行）
+   * 获取对话历史
    */
-  async instructionChat(
-    instruction: string,
-    docIds?: string[],
-    context?: Record<string, any>
-  ): Promise<{
+  async getConversationHistory(conversationId: string, limit: number = 20): Promise<{
     success: boolean;
-    intent: string;
-    result: Record<string, any>;
-    message: string;
-    hint?: string;
-  }> {
-    const url = `${BACKEND_BASE_URL}/instruction/chat`;
-
-    try {
-      const response = await fetch(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ instruction, doc_ids: docIds, context }),
-      });
-
-      if (!response.ok) {
-        const error = await response.json();
-        throw new Error(error.detail || '对话处理失败');
-      }
-
-      return await response.json();
-    } catch (error) {
-      console.error('对话处理失败:', error);
-      throw error;
-    }
-  },
-
-  /**
-   * 获取支持的指令类型列表
-   */
-  async getSupportedIntents(): Promise<{
-    intents: Array<{
-      intent: string;
-      name: string;
-      examples: string[];
-      params: string[];
+    messages: Array<{
+      role: string;
+      content: string;
+      intent?: string;
+      created_at: string;
     }>;
   }> {
-    const url = `${BACKEND_BASE_URL}/instruction/intents`;
+    const url = `${BACKEND_BASE_URL}/conversation/${conversationId}/history?limit=${limit}`;
 
     try {
       const response = await fetch(url);
-      if (!response.ok) throw new Error('获取指令列表失败');
+      if (!response.ok) throw new Error('获取对话历史失败');
       return await response.json();
     } catch (error) {
-      console.error('获取指令列表失败:', error);
-      throw error;
+      console.error('获取对话历史失败:', error);
+      return { success: false, messages: [] };
     }
   },
+
+  /**
+   * 删除对话历史
+   */
+  async deleteConversation(conversationId: string): Promise<{
+    success: boolean;
+  }> {
+    const url = `${BACKEND_BASE_URL}/conversation/${conversationId}`;
+
+    try {
+      const response = await fetch(url, { method: 'DELETE' });
+      if (!response.ok) throw new Error('删除对话历史失败');
+      return await response.json();
+    } catch (error) {
+      console.error('删除对话历史失败:', error);
+      return { success: false };
+    }
+  },
+
+  /**
+   * 获取会话列表
+   */
+  async listConversations(limit: number = 50): Promise<{
+    success: boolean;
+    conversations: Array<any>;
+  }> {
+    const url = `${BACKEND_BASE_URL}/conversation/all?limit=${limit}`;
+
+    try {
+      const response = await fetch(url);
+      if (!response.ok) throw new Error('获取会话列表失败');
+      return await response.json();
+    } catch (error) {
+      console.error('获取会话列表失败:', error);
+      return { success: false, conversations: [] };
+    }
+  }
 };

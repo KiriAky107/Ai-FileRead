@@ -300,13 +300,15 @@ class TableRAGService:
         filename: str,
         sheet_name: Optional[str] = None,
         header_row: int = 0,
-        sample_size: int = 10
+        sample_size: int = 10,
+        skip_rag_index: bool = False
     ) -> Dict[str, Any]:
         """
         为 Excel 表构建完整的 RAG 索引
 
         流程：
         1. 读取 Excel 获取字段信息
+        2. 如果 skip_rag_index=True，跳过 RAG 索引，直接存 MySQL
         2. AI 生成每个字段的语义描述
         3. 将字段描述存入向量数据库
 
@@ -366,6 +368,20 @@ class TableRAGService:
             results["table_name"] = table_name
             results["field_count"] = len(df.columns)
             logger.info(f"表名: {table_name}, 字段数: {len(df.columns)}")
+
+            # 跳过 RAG 索引时直接存 MySQL
+            if skip_rag_index:
+                logger.info(f"跳过 RAG 索引，直接存储到 MySQL")
+                store_result = await self.excel_storage.store_excel(
+                    file_path=file_path,
+                    filename=filename,
+                    sheet_name=sheet_name,
+                    header_row=header_row
+                )
+                results["mysql_table"] = store_result.get("table_name") if store_result.get("success") else None
+                results["row_count"] = store_result.get("row_count", len(df))
+                results["indexed_count"] = 0
+                return results
 
             # 3. 初始化 RAG (如果需要)
             if not self.rag._initialized:

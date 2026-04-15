@@ -526,9 +526,10 @@ class ExcelStorageService:
             # 创建表
             model_class = self._create_table_model(table_name, columns, column_types)
 
-            # 创建表结构
+            # 创建表结构 (使用异步方式)
             async with self.mysql_db.get_session() as session:
-                model_class.__table__.create(session.bind, checkfirst=True)
+                async with session.bind.begin() as conn:
+                    await conn.run_sync(lambda: model_class.__table__.create(checkfirst=True))
 
             # 插入数据
             records = []

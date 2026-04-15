@@ -165,9 +165,9 @@ class BM25:
 class RAGService:
     """RAG 检索增强服务"""
 
-    # 默认分块参数
-    DEFAULT_CHUNK_SIZE = 500  # 每个文本块的大小（字符数）
-    DEFAULT_CHUNK_OVERLAP = 50  # 块之间的重叠（字符数）
+    # 默认分块参数 - 增大块大小减少embedding次数
+    DEFAULT_CHUNK_SIZE = 1000  # 每个文本块的大小（字符数），增大以提升速度
+    DEFAULT_CHUNK_OVERLAP = 100  # 块之间的重叠（字符数）
 
     def __init__(self):
         self.embedding_model = None
@@ -388,6 +388,70 @@ class RAGService:
         # 批量添加文档
         self._add_documents(documents, chunk_ids)
         logger.info(f"已索引文档 {doc_id}，共 {len(chunks)} 个块")
+
+    async def index_document_content_async(
+        self,
+        doc_id: str,
+        content: str,
+        metadata: Optional[Dict[str, Any]] = None,
+        chunk_size: int = None,
+        chunk_overlap: int = None
+    ):
+        """
+        异步将文档内容索引到向量数据库（自动分块）
+
+        使用 asyncio.to_thread 避免阻塞事件循环
+        """
+        import asyncio
+
+        if self._disabled:
+            logger.info(f"[RAG DISABLED] 文档索引操作已跳过: {doc_id}")
+            return
+
+        if not self._initialized:
+            self._init_vector_store()
+
+        if self.embedding_model is None:
+            logger.debug(f"文档跳过索引 (无嵌入模型): {doc_id}")
+            return
+
+        # 分割文档为小块
+        if chunk_size is None:
+            chunk_size = self.DEFAULT_CHUNK_SIZE
+        if chunk_overlap is None:
+            chunk_overlap = self.DEFAULT_CHUNK_OVERLAP
+
+        chunks = self._split_into_chunks(content, chunk_size, chunk_overlap)
+
+        if not chunks:
+            logger.warning(f"文档内容为空，跳过索引: {doc_id}")
+            return
+
+        # 为每个块创建文档对象
+        documents = []
+        chunk_ids = []
+
+        for i, chunk in enumerate(chunks):
+            chunk_id = f"{doc_id}_chunk_{i}"
+            chunk_metadata = metadata.copy() if metadata else {}
+            chunk_metadata.update({
+                "chunk_index": i,
+                "total_chunks": len(chunks),
+                "doc_id": doc_id
+            })
+
+            documents.append(SimpleDocument(
+                page_content=chunk,
+                metadata=chunk_metadata
+            ))
+            chunk_ids.append(chunk_id)
+
+        # 使用线程池执行 CPU 密集型的 embedding 计算
+        def _sync_add():
+            self._add_documents(documents, chunk_ids)
+
+        await asyncio.to_thread(_sync_add)
+        logger.info(f"已异步索引文档 {doc_id}，共 {len(chunks)} 个块")
 
     def _add_documents(self, documents: List[SimpleDocument], doc_ids: List[str]):
         """批量添加文档到向量索引"""

@@ -15,12 +15,14 @@ import {
   Sparkles,
   Database,
   FileSpreadsheet,
-  RefreshCcw
+  RefreshCcw,
+  Trash2
 } from 'lucide-react';
 import { backendApi } from '@/db/backend-api';
 import { formatDistanceToNow } from 'date-fns';
 import { zhCN } from 'date-fns/locale';
 import { cn } from '@/lib/utils';
+import { toast } from 'sonner';
 
 type DocumentItem = {
   doc_id: string;
@@ -108,7 +110,7 @@ const Dashboard: React.FC = () => {
       <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
         {[
           { label: '已上传文档', value: stats.docs, icon: FileText, color: 'bg-blue-500', trend: '非结构化文档', link: '/documents' },
-          { label: 'Excel 文件', value: stats.excelFiles, icon: FileSpreadsheet, color: 'bg-emerald-500', trend: '结构化数据', link: '/excel-parse' },
+          { label: 'Excel 文件', value: stats.excelFiles, icon: FileSpreadsheet, color: 'bg-emerald-500', trend: '结构化数据', link: '/documents' },
           { label: '填表任务', value: stats.tasks, icon: TableProperties, color: 'bg-indigo-500', trend: '待实现', link: '/form-fill' }
         ].map((stat, i) => (
           <Card key={i} className="border-none shadow-md overflow-hidden group hover:shadow-xl transition-all duration-300">
@@ -164,8 +166,30 @@ const Dashboard: React.FC = () => {
                         {doc.doc_type.toUpperCase()} • {formatDistanceToNow(new Date(doc.created_at), { addSuffix: true, locale: zhCN })}
                       </p>
                     </div>
-                    <div className="px-2 py-1 rounded-full text-[10px] font-bold uppercase tracking-wider bg-muted">
-                      {doc.doc_type}
+                    <div className="flex items-center gap-2">
+                      <div className="px-2 py-1 rounded-full text-[10px] font-bold uppercase tracking-wider bg-muted">
+                        {doc.doc_type}
+                      </div>
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        className="opacity-0 group-hover:opacity-100 text-destructive hover:bg-destructive/10 transition-opacity"
+                        onClick={async (e) => {
+                          e.stopPropagation();
+                          if (!confirm(`确定要删除 "${doc.original_filename}" 吗？`)) return;
+                          try {
+                            const result = await backendApi.deleteDocument(doc.doc_id);
+                            if (result.success) {
+                              setRecentDocs(prev => prev.filter(d => d.doc_id !== doc.doc_id));
+                              toast.success('文档已删除');
+                            }
+                          } catch (err: any) {
+                            toast.error(err.message || '删除失败');
+                          }
+                        }}
+                      >
+                        <Trash2 size={16} />
+                      </Button>
                     </div>
                   </div>
                 ))}
@@ -197,7 +221,7 @@ const Dashboard: React.FC = () => {
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
               {[
                 { title: '上传文档', desc: '支持 docx/md/txt', icon: FileText, link: '/documents', color: 'bg-blue-500' },
-                { title: '解析 Excel', desc: '上传并分析数据', icon: FileSpreadsheet, link: '/excel-parse', color: 'bg-emerald-500' },
+                { title: '解析 Excel', desc: '上传并分析数据', icon: FileSpreadsheet, link: '/documents', color: 'bg-emerald-500' },
                 { title: '智能填表', desc: '自动填写表格模板', icon: TableProperties, link: '/form-fill', color: 'bg-indigo-500' },
                 { title: 'AI 助手', desc: '自然语言交互', icon: MessageSquareCode, link: '/assistant', color: 'bg-amber-500' }
               ].map((item, i) => (
