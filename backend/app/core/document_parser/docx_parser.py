@@ -91,11 +91,15 @@ class DocxParser(BaseParser):
                 table_rows.append(row_data)
 
             if table_rows:
+                # 第一行作为表头，其余行作为数据
+                headers = table_rows[0] if table_rows else []
+                data_rows = table_rows[1:] if len(table_rows) > 1 else []
                 tables_data.append({
                     "table_index": i,
-                    "rows": table_rows,
-                    "row_count": len(table_rows),
-                    "column_count": len(table_rows[0]) if table_rows else 0
+                    "headers": headers,  # 添加 headers 字段
+                    "rows": data_rows,  # 数据行（不含表头）
+                    "row_count": len(data_rows),
+                    "column_count": len(headers) if headers else 0
                 })
 
         # 提取图片/嵌入式对象信息

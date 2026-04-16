@@ -54,6 +54,9 @@ class LLMService:
         # 添加其他参数
         payload.update(kwargs)
 
+        import time
+        _start_time = time.time()
+        logger.info(f"🤖 [LLM] 正在调用 DeepSeek API... 模型: {self.model_name}")
         try:
             async with httpx.AsyncClient(timeout=60.0) as client:
                 response = await client.post(
@@ -62,7 +65,10 @@ class LLMService:
                     json=payload
                 )
                 response.raise_for_status()
-                return response.json()
+                result = response.json()
+                _elapsed = time.time() - _start_time
+                logger.info(f"✅ [LLM] DeepSeek API 响应成功 | 模型: {self.model_name} | 耗时: {_elapsed:.2f}s | Token: {result.get('usage', {}).get('total_tokens', 'N/A')}")
+                return result
 
         except httpx.HTTPStatusError as e:
             error_detail = e.response.text
@@ -133,6 +139,9 @@ class LLMService:
 
         payload.update(kwargs)
 
+        import time
+        _start_time = time.time()
+        logger.info(f"🤖 [LLM] 正在调用 DeepSeek API (流式) | 模型: {self.model_name}")
         try:
             async with httpx.AsyncClient(timeout=120.0) as client:
                 async with client.stream(
@@ -141,10 +150,13 @@ class LLMService:
                     headers=headers,
                     json=payload
                 ) as response:
+                    _elapsed = time.time() - _start_time
+                    logger.info(f"✅ [LLM] DeepSeek API 流式响应开始 | 模型: {self.model_name} | 耗时: {_elapsed:.2f}s")
                     async for line in response.aiter_lines():
                         if line.startswith("data: "):
                             data = line[6:]  # Remove "data: " prefix
                             if data == "[DONE]":
+                                logger.info(f"✅ [LLM] DeepSeek API 流式响应完成")
                                 break
                             try:
                                 import json as json_module

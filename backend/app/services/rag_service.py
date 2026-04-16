@@ -669,7 +669,7 @@ class RAGService:
         # 按融合分数降序排序
         fused_results.sort(key=lambda x: x["score"], reverse=True)
 
-        logger.debug(f"混合融合: {len(fused_results)} 个文档, 向量:{len(vector_results)}, BM25:{len(bm25_results)}")
+        logger.info(f"RRF 混合融合: {len(fused_results)} 个文档参与融合, 向量检索命中:{len(vector_results)}, BM25命中:{len(bm25_results)}")
 
         return fused_results[:top_k]
 
