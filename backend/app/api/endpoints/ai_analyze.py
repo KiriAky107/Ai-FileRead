@@ -12,6 +12,7 @@ from app.services.excel_ai_service import excel_ai_service
 from app.services.markdown_ai_service import markdown_ai_service
 from app.services.template_fill_service import template_fill_service
 from app.services.word_ai_service import word_ai_service
+from app.services.txt_ai_service import txt_ai_service
 
 logger = logging.getLogger(__name__)
 
@@ -347,17 +348,20 @@ async def get_markdown_outline(
 @router.post("/analyze/txt")
 async def analyze_txt(
     file: UploadFile = File(...),
+    analysis_type: str = Query("structured", description="分析类型: structured, charts")
 ):
     """
-    上传并使用 AI 分析 TXT 文本文件，提取结构化数据
+    上传并使用 AI 分析 TXT 文本文件，提取结构化数据或生成图表
 
     将非结构化文本转换为结构化表格数据，便于后续填表使用
+    当 analysis_type=charts 时，可生成可视化图表
 
     Args:
         file: 上传的 TXT 文件
+        analysis_type: 分析类型 - "structured"（默认，提取结构化数据）或 "charts"（生成图表）
 
     Returns:
-        dict: 分析结果，包含结构化表格数据
+        dict: 分析结果，包含结构化表格数据或图表数据
     """
     if not file.filename:
         raise HTTPException(status_code=400, detail="文件名为空")
@@ -372,6 +376,7 @@ async def analyze_txt(
     try:
         # 读取文件内容
         content = await file.read()
+        text_content = content.decode('utf-8', errors='replace')
 
         # 保存到临时文件
         with tempfile.NamedTemporaryFile(mode='wb', suffix='.txt', delete=False) as tmp:
@@ -379,20 +384,22 @@ async def analyze_txt(
             tmp_path = tmp.name
 
         try:
-            logger.info(f"开始 AI 分析 TXT 文件: {file.filename}")
+            logger.info(f"开始 AI 分析 TXT 文件: {file.filename}, analysis_type={analysis_type}")
 
-            # 使用 template_fill_service 的 AI 分析方法
-            result = await template_fill_service.analyze_txt_with_ai(
-                content=content.decode('utf-8', errors='replace'),
-                filename=file.filename
+            # 使用 txt_ai_service 的 AI 分析方法
+            result = await txt_ai_service.analyze_txt_with_ai(
+                content=text_content,
+                filename=file.filename,
+                analysis_type=analysis_type
             )
 
             if result:
                 logger.info(f"TXT AI 分析成功: {file.filename}")
                 return {
-                    "success": True,
+                    "success": result.get("success", True),
                     "filename": file.filename,
-                    "structured_data": result
+                    "analysis_type": analysis_type,
+                    "result": result
                 }
             else:
                 logger.warning(f"TXT AI 分析返回空结果: {file.filename}")
@@ -400,7 +407,7 @@ async def analyze_txt(
                     "success": False,
                     "filename": file.filename,
                     "error": "AI 分析未能提取到结构化数据",
-                    "structured_data": None
+                    "result": None
                 }
 
         finally:
@@ -420,19 +427,22 @@ async def analyze_txt(
 @router.post("/analyze/word")
 async def analyze_word(
     file: UploadFile = File(...),
-    user_hint: str = Query("", description="用户提示词，如'请提取表格数据'")
+    user_hint: str = Query("", description="用户提示词，如'请提取表格数据'"),
+    analysis_type: str = Query("structured", description="分析类型: structured, charts")
 ):
     """
-    使用 AI 解析 Word 文档，提取结构化数据
+    使用 AI 解析 Word 文档，提取结构化数据或生成图表
 
     适用于从非结构化的 Word 文档中提取表格数据、键值对等信息
+    当 analysis_type=charts 时，可生成可视化图表
 
     Args:
         file: 上传的 Word 文件
         user_hint: 用户提示词
+        analysis_type: 分析类型 - "structured"（默认，提取结构化数据）或 "charts"（生成图表）
 
     Returns:
-        dict: 包含结构化数据的解析结果
+        dict: 包含结构化数据的解析结果或图表数据
     """
     if not file.filename:
         raise HTTPException(status_code=400, detail="文件名为空")
@@ -453,16 +463,25 @@ async def analyze_word(
             tmp_path = tmp.name
 
         try:
-            # 使用 AI 解析 Word 文档
-            result = await word_ai_service.parse_word_with_ai(
-                file_path=tmp_path,
-                user_hint=user_hint or "请提取文档中的所有结构化数据，包括表格、键值对等"
-            )
+            # 根据 analysis_type 选择处理方式
+            if analysis_type == "charts":
+                # 生成图表
+                result = await word_ai_service.generate_charts(
+                    file_path=tmp_path,
+                    user_hint=user_hint
+                )
+            else:
+                # 提取结构化数据
+                result = await word_ai_service.parse_word_with_ai(
+                    file_path=tmp_path,
+                    user_hint=user_hint or "请提取文档中的所有结构化数据，包括表格、键值对等"
+                )
 
             if result.get("success"):
                 return {
                     "success": True,
                     "filename": file.filename,
+                    "analysis_type": analysis_type,
                     "result": result
                 }
             else:

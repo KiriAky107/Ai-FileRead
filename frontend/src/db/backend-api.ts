@@ -250,6 +250,98 @@ export interface AIExcelAnalyzeResult {
   error?: string;
 }
 
+// ==================== Word/TXT AI 分析类型 ====================
+
+export type WordAnalysisType = 'structured' | 'charts';
+export type TxtAnalysisType = 'structured' | 'charts';
+
+export interface WordAIStructuredResult {
+  success: boolean;
+  result?: {
+    success?: boolean;
+    type?: string;
+    headers?: string[];
+    rows?: string[][];
+    key_values?: Record<string, string>;
+    list_items?: string[];
+    summary?: string;
+    error?: string;
+  };
+  error?: string;
+}
+
+export interface WordAIChartsResult {
+  success: boolean;
+  result?: {
+    success?: boolean;
+    charts?: {
+      histograms?: Array<any>;
+      bar_charts?: Array<any>;
+      box_plots?: Array<any>;
+      correlation?: any;
+    };
+    statistics?: {
+      numeric?: Record<string, any>;
+      categorical?: Record<string, any>;
+    };
+    distributions?: Record<string, any>;
+    row_count?: number;
+    column_count?: number;
+    error?: string;
+  };
+  error?: string;
+}
+
+export interface TxtAIStructuredResult {
+  success: boolean;
+  result?: {
+    success?: boolean;
+    type?: string;
+    tables?: Array<{
+      headers?: string[];
+      rows?: string[][];
+    }>;
+    key_values?: Record<string, string>;
+    list_items?: string[];
+    summary?: string;
+    error?: string;
+  };
+  error?: string;
+}
+
+export interface TxtAIChartsResult {
+  success: boolean;
+  result?: {
+    success?: boolean;
+    charts?: {
+      histograms?: Array<any>;
+      bar_charts?: Array<any>;
+      box_plots?: Array<any>;
+      correlation?: any;
+    };
+    statistics?: {
+      numeric?: Record<string, any>;
+      categorical?: Record<string, any>;
+    };
+    distributions?: Record<string, any>;
+    row_count?: number;
+    column_count?: number;
+    key_statistics?: Array<{
+      name?: string;
+      value?: string;
+      trend?: string;
+      description?: string;
+    }>;
+    chart_suggestions?: Array<{
+      chart_type?: string;
+      title?: string;
+      data_source?: string;
+    }>;
+    error?: string;
+  };
+  error?: string;
+}
+
 // ==================== API 封装 ====================
 
 export const backendApi = {
@@ -1337,28 +1429,25 @@ export const aiApi = {
   },
 
   /**
-   * 上传并使用 AI 分析 TXT 文本文件，提取结构化数据
+   * 上传并使用 AI 分析 TXT 文本文件，提取结构化数据或生成图表
    */
   async analyzeTxt(
-    file: File
+    file: File,
+    analysisType: TxtAnalysisType = 'structured'
   ): Promise<{
     success: boolean;
     filename?: string;
-    structured_data?: {
-      table?: {
-        columns?: string[];
-        rows?: string[][];
-      };
-      summary?: string;
-      key_value_pairs?: Array<{ key: string; value: string }>;
-      numeric_data?: Array<{ name: string; value: number; unit?: string }>;
-    };
+    analysis_type?: string;
+    result?: any;
     error?: string;
   }> {
     const formData = new FormData();
     formData.append('file', file);
 
-    const url = `${BACKEND_BASE_URL}/ai/analyze/txt`;
+    const params = new URLSearchParams();
+    params.append('analysis_type', analysisType);
+
+    const url = `${BACKEND_BASE_URL}/ai/analyze/txt?${params.toString()}`;
 
     try {
       const response = await fetch(url, {
@@ -1480,19 +1569,17 @@ export const aiApi = {
   // ==================== Word AI 解析 ====================
 
   /**
-   * 使用 AI 解析 Word 文档，提取结构化数据
+   * 使用 AI 解析 Word 文档，提取结构化数据或生成图表
    */
   async analyzeWordWithAI(
     file: File,
-    userHint: string = ''
+    userHint: string = '',
+    analysisType: WordAnalysisType = 'structured'
   ): Promise<{
     success: boolean;
-    type?: string;
-    headers?: string[];
-    rows?: string[][];
-    key_values?: Record<string, string>;
-    list_items?: string[];
-    summary?: string;
+    filename?: string;
+    analysis_type?: string;
+    result?: any;
     error?: string;
   }> {
     const formData = new FormData();
@@ -1501,7 +1588,10 @@ export const aiApi = {
       formData.append('user_hint', userHint);
     }
 
-    const url = `${BACKEND_BASE_URL}/ai/analyze/word`;
+    const params = new URLSearchParams();
+    params.append('analysis_type', analysisType);
+
+    const url = `${BACKEND_BASE_URL}/ai/analyze/word?${params.toString()}`;
 
     try {
       const response = await fetch(url, {

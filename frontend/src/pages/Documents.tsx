@@ -107,6 +107,15 @@ const Documents: React.FC = () => {
   const [mdStreaming, setMdStreaming] = useState(false);
   const [mdStreamingContent, setMdStreamingContent] = useState('');
 
+  // Word AI 分析相关状态
+  const [wordAnalysis, setWordAnalysis] = useState<any>(null);
+  const [wordAnalysisType, setWordAnalysisType] = useState<'structured' | 'charts'>('structured');
+  const [wordUserHint, setWordUserHint] = useState('');
+
+  // TXT AI 分析相关状态
+  const [txtAnalysis, setTxtAnalysis] = useState<any>(null);
+  const [txtAnalysisType, setTxtAnalysisType] = useState<'structured' | 'charts'>('structured');
+
   // RAG 向量检索相关状态
   const [ragStatus, setRagStatus] = useState<{ vector_count: number; collections: string[] } | null>(null);
   const [ragSearchQuery, setRagSearchQuery] = useState('');
@@ -701,6 +710,62 @@ const Documents: React.FC = () => {
     }
   };
 
+  // Word AI 分析处理
+  const handleWordAnalyze = async () => {
+    if (!uploadedFile || !isWordFile(uploadedFile.name)) {
+      toast.error('请先上传 Word 文件');
+      return;
+    }
+
+    setAnalyzing(true);
+    setWordAnalysis(null);
+
+    try {
+      const result = await aiApi.analyzeWordWithAI(
+        uploadedFile,
+        wordUserHint,
+        wordAnalysisType
+      );
+
+      if (result.success) {
+        toast.success('Word AI 分析完成');
+        setWordAnalysis(result);
+      } else {
+        toast.error(result.error || 'AI 分析失败');
+      }
+    } catch (error: any) {
+      toast.error(error.message || 'AI 分析失败');
+    } finally {
+      setAnalyzing(false);
+    }
+  };
+
+  // TXT AI 分析处理
+  const handleTxtAnalyze = async () => {
+    if (!uploadedFile || !isTxtFile(uploadedFile.name)) {
+      toast.error('请先上传 TXT 文件');
+      return;
+    }
+
+    setAnalyzing(true);
+    setTxtAnalysis(null);
+
+    try {
+      const result = await aiApi.analyzeTxt(uploadedFile, txtAnalysisType);
+
+      if (result.success) {
+        toast.success('TXT AI 分析完成');
+        setTxtAnalysis(result);
+      } else {
+        toast.error(result.error || 'AI 分析失败');
+      }
+    } catch (error: any) {
+      toast.error(error.message || 'AI 分析失败');
+    } finally {
+      setAnalyzing(false);
+    }
+  };
+
   const getMdAnalysisIcon = (type: string) => {
     switch (type) {
       case 'summary': return <FileText size={20} />;
@@ -737,6 +802,16 @@ const Documents: React.FC = () => {
   const isExcelFile = (filename: string) => {
     const ext = filename.split('.').pop()?.toLowerCase();
     return ext === 'xlsx' || ext === 'xls';
+  };
+
+  const isWordFile = (filename: string) => {
+    const ext = filename.split('.').pop()?.toLowerCase();
+    return ext === 'docx';
+  };
+
+  const isTxtFile = (filename: string) => {
+    const ext = filename.split('.').pop()?.toLowerCase();
+    return ext === 'txt';
   };
 
   return (
@@ -1238,6 +1313,115 @@ const Documents: React.FC = () => {
             </Card>
           )}
 
+          {/* Word AI 分析选项 */}
+          {uploadedFile && isWordFile(uploadedFile.name) && (
+            <Card className="border-none shadow-md bg-gradient-to-br from-blue-500/5 to-cyan-500/5">
+              <CardHeader className="pb-4">
+                <CardTitle className="flex items-center gap-2">
+                  <Sparkles className="text-blue-500" size={20} />
+                  Word AI 分析
+                </CardTitle>
+              </CardHeader>
+              <CardContent className="space-y-4">
+                <div className="space-y-2">
+                  <Label htmlFor="word-analysis-type" className="text-sm">分析类型</Label>
+                  <Select value={wordAnalysisType} onValueChange={(value: any) => setWordAnalysisType(value)}>
+                    <SelectTrigger id="word-analysis-type" className="bg-background">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="structured">
+                        <div className="flex items-center gap-2">
+                          <FileText size={16} />
+                          <div className="flex flex-col">
+                            <span className="font-medium">结构化提取</span>
+                            <span className="text-xs text-muted-foreground">提取表格、键值对等</span>
+                          </div>
+                        </div>
+                      </SelectItem>
+                      <SelectItem value="charts">
+                        <div className="flex items-center gap-2">
+                          <TrendingUp size={16} />
+                          <div className="flex flex-col">
+                            <span className="font-medium">数据图表</span>
+                            <span className="text-xs text-muted-foreground">生成可视化图表</span>
+                          </div>
+                        </div>
+                      </SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div className="space-y-2">
+                  <Label htmlFor="word-user-prompt" className="text-sm">自定义提示词（可选）</Label>
+                  <Textarea
+                    id="word-user-prompt"
+                    placeholder="例如：请提取文档中的表格数据..."
+                    value={wordUserHint}
+                    onChange={(e) => setWordUserHint(e.target.value)}
+                    className="bg-background resize-none"
+                    rows={2}
+                  />
+                </div>
+                <Button
+                  onClick={handleWordAnalyze}
+                  disabled={analyzing}
+                  className="w-full bg-gradient-to-r from-blue-500 to-cyan-600 hover:from-blue-500/90 hover:to-cyan-600/90"
+                >
+                  {analyzing ? <><Loader2 className="mr-2 animate-spin" size={16} /> 分析中...</> : <><Sparkles className="mr-2" size={16} />开始 AI 分析</>}
+                </Button>
+              </CardContent>
+            </Card>
+          )}
+
+          {/* TXT AI 分析选项 */}
+          {uploadedFile && isTxtFile(uploadedFile.name) && (
+            <Card className="border-none shadow-md bg-gradient-to-br from-amber-500/5 to-orange-500/5">
+              <CardHeader className="pb-4">
+                <CardTitle className="flex items-center gap-2">
+                  <Sparkles className="text-amber-500" size={20} />
+                  TXT AI 分析
+                </CardTitle>
+              </CardHeader>
+              <CardContent className="space-y-4">
+                <div className="space-y-2">
+                  <Label htmlFor="txt-analysis-type" className="text-sm">分析类型</Label>
+                  <Select value={txtAnalysisType} onValueChange={(value: any) => setTxtAnalysisType(value)}>
+                    <SelectTrigger id="txt-analysis-type" className="bg-background">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="structured">
+                        <div className="flex items-center gap-2">
+                          <FileText size={16} />
+                          <div className="flex flex-col">
+                            <span className="font-medium">结构化提取</span>
+                            <span className="text-xs text-muted-foreground">提取表格、键值对等</span>
+                          </div>
+                        </div>
+                      </SelectItem>
+                      <SelectItem value="charts">
+                        <div className="flex items-center gap-2">
+                          <TrendingUp size={16} />
+                          <div className="flex flex-col">
+                            <span className="font-medium">数据图表</span>
+                            <span className="text-xs text-muted-foreground">生成可视化图表</span>
+                          </div>
+                        </div>
+                      </SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+                <Button
+                  onClick={handleTxtAnalyze}
+                  disabled={analyzing}
+                  className="w-full bg-gradient-to-r from-amber-500 to-orange-600 hover:from-amber-500/90 hover:to-orange-600/90"
+                >
+                  {analyzing ? <><Loader2 className="mr-2 animate-spin" size={16} /> 分析中...</> : <><Sparkles className="mr-2" size={16} />开始 AI 分析</>}
+                </Button>
+              </CardContent>
+            </Card>
+          )}
+
           {/* 数据操作 */}
           {parseResult?.success && (
             <Card className="border-none shadow-md bg-gradient-to-br from-emerald-500/5 to-blue-500/5">
@@ -1334,6 +1518,114 @@ const Documents: React.FC = () => {
                 {mdStreamingContent && <Markdown content={mdStreamingContent} />}
                 {mdAnalysis?.analysis && !mdStreamingContent && <Markdown content={mdAnalysis.analysis} />}
                 {!mdAnalysis?.success && !mdStreamingContent && <p className="text-sm text-destructive">{mdAnalysis?.error || '分析失败'}</p>}
+              </CardContent>
+            </Card>
+          )}
+
+          {/* Word AI 分析结果 */}
+          {wordAnalysis && (
+            <Card className="border-none shadow-md border-l-4 border-l-blue-500">
+              <CardHeader>
+                <div className="flex items-center justify-between">
+                  <div className="space-y-1">
+                    <CardTitle className="flex items-center gap-2">
+                      <Sparkles className="text-blue-500" size={20} />
+                      Word AI 分析结果
+                    </CardTitle>
+                    {wordAnalysis.filename && (
+                      <CardDescription>
+                        {wordAnalysis.filename} • {wordAnalysis.analysis_type}
+                      </CardDescription>
+                    )}
+                  </div>
+                </div>
+              </CardHeader>
+              <CardContent className="max-h-[500px] overflow-y-auto">
+                {wordAnalysis.analysis_type === 'charts' && wordAnalysis.result?.charts ? (
+                  <AIChartDisplay
+                    charts={wordAnalysis.result.charts}
+                    statistics={wordAnalysis.result.statistics}
+                    distributions={wordAnalysis.result.distributions}
+                  />
+                ) : wordAnalysis.result?.success === false ? (
+                  <p className="text-sm text-destructive">{wordAnalysis.result?.error || wordAnalysis.error || '分析失败'}</p>
+                ) : wordAnalysis.result?.summary ? (
+                  <Markdown content={wordAnalysis.result.summary} />
+                ) : wordAnalysis.result?.headers && wordAnalysis.result?.rows ? (
+                  <div className="space-y-2">
+                    <p className="text-sm font-medium">提取的表格数据：</p>
+                    <div className="border rounded-lg overflow-x-auto">
+                      <TableComponent>
+                        <TableHeader>
+                          <TableRow>
+                            {wordAnalysis.result.headers.map((header: string, idx: number) => (
+                              <TableHead key={idx}>{header}</TableHead>
+                            ))}
+                          </TableRow>
+                        </TableHeader>
+                        <TableBody>
+                          {wordAnalysis.result.rows.slice(0, 20).map((row: string[], idx: number) => (
+                            <TableRow key={idx}>
+                              {row.map((cell: string, cidx: number) => (
+                                <TableCell key={cidx}>{cell}</TableCell>
+                              ))}
+                            </TableRow>
+                          ))}
+                        </TableBody>
+                      </TableComponent>
+                    </div>
+                  </div>
+                ) : (
+                  <p className="text-sm text-muted-foreground">分析完成，无数据</p>
+                )}
+              </CardContent>
+            </Card>
+          )}
+
+          {/* TXT AI 分析结果 */}
+          {txtAnalysis && (
+            <Card className="border-none shadow-md border-l-4 border-l-amber-500">
+              <CardHeader>
+                <div className="flex items-center justify-between">
+                  <div className="space-y-1">
+                    <CardTitle className="flex items-center gap-2">
+                      <Sparkles className="text-amber-500" size={20} />
+                      TXT AI 分析结果
+                    </CardTitle>
+                    {txtAnalysis.filename && (
+                      <CardDescription>
+                        {txtAnalysis.filename} • {txtAnalysis.analysis_type}
+                      </CardDescription>
+                    )}
+                  </div>
+                </div>
+              </CardHeader>
+              <CardContent className="max-h-[500px] overflow-y-auto">
+                {txtAnalysis.analysis_type === 'charts' && txtAnalysis.result?.charts ? (
+                  <AIChartDisplay
+                    charts={txtAnalysis.result.charts}
+                    statistics={txtAnalysis.result.statistics}
+                    distributions={txtAnalysis.result.distributions}
+                  />
+                ) : txtAnalysis.result?.success === false ? (
+                  <p className="text-sm text-destructive">{txtAnalysis.result?.error || txtAnalysis.error || '分析失败'}</p>
+                ) : txtAnalysis.result?.summary ? (
+                  <Markdown content={txtAnalysis.result.summary} />
+                ) : txtAnalysis.result?.key_values && Object.keys(txtAnalysis.result.key_values || {}).length > 0 ? (
+                  <div className="space-y-2">
+                    <p className="text-sm font-medium">提取的键值对：</p>
+                    <div className="grid grid-cols-2 gap-2">
+                      {Object.entries(txtAnalysis.result.key_values || {}).map(([key, value]: [string, any]) => (
+                        <div key={key} className="flex gap-2 p-2 bg-muted/30 rounded-lg">
+                          <span className="font-medium text-sm">{key}:</span>
+                          <span className="text-sm text-muted-foreground">{String(value)}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                ) : (
+                  <p className="text-sm text-muted-foreground">分析完成，无数据</p>
+                )}
               </CardContent>
             </Card>
           )}
