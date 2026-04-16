@@ -154,8 +154,9 @@ async def analyze_text(
 
 @router.post("/analyze/md")
 async def analyze_markdown(
-    file: UploadFile = File(...),
-    analysis_type: str = Query("summary", description="分析类型: summary, outline, key_points, questions, tags, qa, statistics, section"),
+    file: Optional[UploadFile] = File(None),
+    doc_id: Optional[str] = Query(None, description="文档ID（从数据库读取）"),
+    analysis_type: str = Query("summary", description="分析类型: summary, outline, key_points, questions, tags, qa, statistics, section, charts"),
     user_prompt: str = Query("", description="用户自定义提示词"),
     section_number: Optional[str] = Query(None, description="指定章节编号，如 '一' 或 '（一）'")
 ):
@@ -163,7 +164,8 @@ async def analyze_markdown(
     上传并使用 AI 分析 Markdown 文件
 
     Args:
-        file: 上传的 Markdown 文件
+        file: 上传的 Markdown 文件（与 doc_id 二选一）
+        doc_id: 文档ID（从数据库读取）
         analysis_type: 分析类型
         user_prompt: 用户自定义提示词
         section_number: 指定分析的章节编号
@@ -171,16 +173,8 @@ async def analyze_markdown(
     Returns:
         dict: 分析结果
     """
-    # 检查文件类型
-    if not file.filename:
-        raise HTTPException(status_code=400, detail="文件名为空")
-
-    file_ext = file.filename.split('.')[-1].lower()
-    if file_ext not in ['md', 'markdown']:
-        raise HTTPException(
-            status_code=400,
-            detail=f"不支持的文件类型: {file_ext}，仅支持 .md 和 .markdown"
-        )
+    filename = None
+    tmp_path = None
 
     # 验证分析类型
     supported_types = markdown_ai_service.get_supported_analysis_types()
@@ -190,46 +184,96 @@ async def analyze_markdown(
             detail=f"不支持的分析类型: {analysis_type}，支持的类型: {', '.join(supported_types)}"
         )
 
-    try:
-        # 读取文件内容
-        content = await file.read()
-
-        # 保存到临时文件
-        with tempfile.NamedTemporaryFile(mode='wb', suffix='.md', delete=False) as tmp:
-            tmp.write(content)
-            tmp_path = tmp.name
-
+    if doc_id:
+        # 从数据库读取文档
         try:
-            logger.info(f"开始分析 Markdown 文件: {file.filename}, 分析类型: {analysis_type}, 章节: {section_number}")
+            from app.core.database.mongodb import mongodb
+            doc = await mongodb.get_document(doc_id)
+            if not doc:
+                raise HTTPException(status_code=404, detail=f"文档不存在: {doc_id}")
 
-            # 调用 AI 分析服务
-            result = await markdown_ai_service.analyze_markdown(
-                file_path=tmp_path,
-                analysis_type=analysis_type,
-                user_prompt=user_prompt,
-                section_number=section_number
+            filename = doc.get("metadata", {}).get("original_filename", "unknown.md")
+            file_ext = filename.split('.')[-1].lower()
+
+            if file_ext not in ['md', 'markdown']:
+                raise HTTPException(status_code=400, detail=f"文档类型不是 Markdown: {file_ext}")
+
+            content = doc.get("content", "")
+            if not content:
+                raise HTTPException(status_code=400, detail="文档内容为空")
+
+            # 保存到临时文件
+            with tempfile.NamedTemporaryFile(mode='wb', suffix='.md', delete=False) as tmp:
+                tmp.write(content.encode('utf-8'))
+                tmp_path = tmp.name
+
+            logger.info(f"从数据库加载 Markdown 文档: {filename}, 长度: {len(content)}")
+
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"从数据库读取 Markdown 文档失败: {str(e)}")
+            raise HTTPException(status_code=500, detail=f"读取文档失败: {str(e)}")
+    else:
+        # 文件上传模式
+        if not file:
+            raise HTTPException(status_code=400, detail="请提供文件或文档ID")
+
+        if not file.filename:
+            raise HTTPException(status_code=400, detail="文件名为空")
+
+        file_ext = file.filename.split('.')[-1].lower()
+        if file_ext not in ['md', 'markdown']:
+            raise HTTPException(
+                status_code=400,
+                detail=f"不支持的文件类型: {file_ext}，仅支持 .md 和 .markdown"
             )
 
-            logger.info(f"Markdown 分析完成: {file.filename}, 成功: {result['success']}")
+        try:
+            # 读取文件内容
+            content = await file.read()
 
-            if not result['success']:
-                raise HTTPException(status_code=500, detail=result.get('error', '分析失败'))
+            # 保存到临时文件
+            with tempfile.NamedTemporaryFile(mode='wb', suffix='.md', delete=False) as tmp:
+                tmp.write(content)
+                tmp_path = tmp.name
 
-            return result
+            filename = file.filename
 
-        finally:
-            # 清理临时文件，确保在所有情况下都能清理
-            try:
-                if tmp_path and os.path.exists(tmp_path):
-                    os.unlink(tmp_path)
-            except Exception as cleanup_error:
-                logger.warning(f"临时文件清理失败: {tmp_path}, error: {cleanup_error}")
+        except Exception as e:
+            logger.error(f"读取 Markdown 文件失败: {str(e)}")
+            raise HTTPException(status_code=500, detail=f"读取文件失败: {str(e)}")
+
+    try:
+        logger.info(f"开始分析 Markdown 文件: {filename}, 分析类型: {analysis_type}, 章节: {section_number}")
+
+        # 调用 AI 分析服务
+        result = await markdown_ai_service.analyze_markdown(
+            file_path=tmp_path,
+            analysis_type=analysis_type,
+            user_prompt=user_prompt,
+            section_number=section_number
+        )
+
+        logger.info(f"Markdown 分析完成: {filename}, 成功: {result['success']}")
+
+        if not result['success']:
+            raise HTTPException(status_code=500, detail=result.get('error', '分析失败'))
+
+        return result
 
     except HTTPException:
         raise
     except Exception as e:
         logger.error(f"Markdown AI 分析过程中出错: {str(e)}")
         raise HTTPException(status_code=500, detail=f"分析失败: {str(e)}")
+    finally:
+        # 清理临时文件
+        if tmp_path and os.path.exists(tmp_path):
+            try:
+                os.unlink(tmp_path)
+            except Exception as cleanup_error:
+                logger.warning(f"临时文件清理失败: {tmp_path}, error: {cleanup_error}")
 
 
 @router.post("/analyze/md/stream")
@@ -347,7 +391,8 @@ async def get_markdown_outline(
 
 @router.post("/analyze/txt")
 async def analyze_txt(
-    file: UploadFile = File(...),
+    file: Optional[UploadFile] = File(None),
+    doc_id: Optional[str] = Query(None, description="文档ID（从数据库读取）"),
     analysis_type: str = Query("structured", description="分析类型: structured, charts")
 ):
     """
@@ -357,63 +402,89 @@ async def analyze_txt(
     当 analysis_type=charts 时，可生成可视化图表
 
     Args:
-        file: 上传的 TXT 文件
+        file: 上传的 TXT 文件（与 doc_id 二选一）
+        doc_id: 文档ID（从数据库读取）
         analysis_type: 分析类型 - "structured"（默认，提取结构化数据）或 "charts"（生成图表）
 
     Returns:
         dict: 分析结果，包含结构化表格数据或图表数据
     """
-    if not file.filename:
-        raise HTTPException(status_code=400, detail="文件名为空")
+    filename = None
+    text_content = None
 
-    file_ext = file.filename.split('.')[-1].lower()
-    if file_ext not in ['txt', 'text']:
-        raise HTTPException(
-            status_code=400,
-            detail=f"不支持的文件类型: {file_ext}，仅支持 .txt"
-        )
+    if doc_id:
+        # 从数据库读取文档
+        try:
+            from app.core.database.mongodb import mongodb
+            doc = await mongodb.get_document(doc_id)
+            if not doc:
+                raise HTTPException(status_code=404, detail=f"文档不存在: {doc_id}")
 
-    try:
+            filename = doc.get("metadata", {}).get("original_filename", "unknown.txt")
+            file_ext = filename.split('.')[-1].lower()
+
+            if file_ext not in ['txt', 'text']:
+                raise HTTPException(status_code=400, detail=f"文档类型不是 TXT: {file_ext}")
+
+            # 使用数据库中的 content
+            text_content = doc.get("content", "")
+
+            if not text_content:
+                raise HTTPException(status_code=400, detail="文档内容为空")
+
+            logger.info(f"从数据库加载 TXT 文档: {filename}, 长度: {len(text_content)}")
+
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"从数据库读取 TXT 文档失败: {str(e)}")
+            raise HTTPException(status_code=500, detail=f"读取文档失败: {str(e)}")
+    else:
+        # 文件上传模式
+        if not file:
+            raise HTTPException(status_code=400, detail="请提供文件或文档ID")
+
+        if not file.filename:
+            raise HTTPException(status_code=400, detail="文件名为空")
+
+        file_ext = file.filename.split('.')[-1].lower()
+        if file_ext not in ['txt', 'text']:
+            raise HTTPException(
+                status_code=400,
+                detail=f"不支持的文件类型: {file_ext}，仅支持 .txt"
+            )
+
         # 读取文件内容
         content = await file.read()
         text_content = content.decode('utf-8', errors='replace')
+        filename = file.filename
 
-        # 保存到临时文件
-        with tempfile.NamedTemporaryFile(mode='wb', suffix='.txt', delete=False) as tmp:
-            tmp.write(content)
-            tmp_path = tmp.name
+    try:
+        logger.info(f"开始 AI 分析 TXT 文件: {filename}, analysis_type={analysis_type}")
 
-        try:
-            logger.info(f"开始 AI 分析 TXT 文件: {file.filename}, analysis_type={analysis_type}")
+        # 使用 txt_ai_service 的 AI 分析方法
+        result = await txt_ai_service.analyze_txt_with_ai(
+            content=text_content,
+            filename=filename,
+            analysis_type=analysis_type
+        )
 
-            # 使用 txt_ai_service 的 AI 分析方法
-            result = await txt_ai_service.analyze_txt_with_ai(
-                content=text_content,
-                filename=file.filename,
-                analysis_type=analysis_type
-            )
-
-            if result:
-                logger.info(f"TXT AI 分析成功: {file.filename}")
-                return {
-                    "success": result.get("success", True),
-                    "filename": file.filename,
-                    "analysis_type": analysis_type,
-                    "result": result
-                }
-            else:
-                logger.warning(f"TXT AI 分析返回空结果: {file.filename}")
-                return {
-                    "success": False,
-                    "filename": file.filename,
-                    "error": "AI 分析未能提取到结构化数据",
-                    "result": None
-                }
-
-        finally:
-            # 清理临时文件
-            if os.path.exists(tmp_path):
-                os.unlink(tmp_path)
+        if result:
+            logger.info(f"TXT AI 分析成功: {filename}")
+            return {
+                "success": result.get("success", True),
+                "filename": filename,
+                "analysis_type": analysis_type,
+                "result": result
+            }
+        else:
+            logger.warning(f"TXT AI 分析返回空结果: {filename}")
+            return {
+                "success": False,
+                "filename": filename,
+                "error": "AI 分析未能提取到结构化数据",
+                "result": None
+            }
 
     except HTTPException:
         raise
@@ -426,7 +497,8 @@ async def analyze_txt(
 
 @router.post("/analyze/word")
 async def analyze_word(
-    file: UploadFile = File(...),
+    file: Optional[UploadFile] = File(None),
+    doc_id: Optional[str] = Query(None, description="文档ID（从数据库读取）"),
     user_hint: str = Query("", description="用户提示词，如'请提取表格数据'"),
     analysis_type: str = Query("structured", description="分析类型: structured, charts")
 ):
@@ -437,13 +509,77 @@ async def analyze_word(
     当 analysis_type=charts 时，可生成可视化图表
 
     Args:
-        file: 上传的 Word 文件
+        file: 上传的 Word 文件（与 doc_id 二选一）
+        doc_id: 文档ID（从数据库读取）
         user_hint: 用户提示词
         analysis_type: 分析类型 - "structured"（默认，提取结构化数据）或 "charts"（生成图表）
 
     Returns:
         dict: 包含结构化数据的解析结果或图表数据
     """
+    # 获取文件名和扩展名
+    filename = None
+    file_ext = None
+
+    if doc_id:
+        # 从数据库读取文档
+        try:
+            from app.core.database.mongodb import mongodb
+            doc = await mongodb.get_document(doc_id)
+            if not doc:
+                raise HTTPException(status_code=404, detail=f"文档不存在: {doc_id}")
+
+            filename = doc.get("metadata", {}).get("original_filename", "unknown.docx")
+            file_ext = filename.split('.')[-1].lower()
+
+            if file_ext not in ['docx']:
+                raise HTTPException(status_code=400, detail=f"文档类型不是 Word: {file_ext}")
+
+            # 使用数据库中的 content 进行分析
+            content = doc.get("content", "")
+            tables = doc.get("structured_data", {}).get("tables", [])
+
+            # 调用 AI 分析服务，传入数据库内容
+            if analysis_type == "charts":
+                result = await word_ai_service.generate_charts_from_db(
+                    content=content,
+                    tables=tables,
+                    filename=filename,
+                    user_hint=user_hint
+                )
+            else:
+                result = await word_ai_service.parse_word_with_ai_from_db(
+                    content=content,
+                    tables=tables,
+                    filename=filename,
+                    user_hint=user_hint or "请提取文档中的所有结构化数据，包括表格、键值对等"
+                )
+
+            if result.get("success"):
+                return {
+                    "success": True,
+                    "filename": filename,
+                    "analysis_type": analysis_type,
+                    "result": result
+                }
+            else:
+                return {
+                    "success": False,
+                    "filename": filename,
+                    "error": result.get("error", "AI 解析失败"),
+                    "result": None
+                }
+
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"从数据库读取 Word 文档失败: {str(e)}")
+            raise HTTPException(status_code=500, detail=f"读取文档失败: {str(e)}")
+
+    # 文件上传模式
+    if not file:
+        raise HTTPException(status_code=400, detail="请提供文件或文档ID")
+
     if not file.filename:
         raise HTTPException(status_code=400, detail="文件名为空")
 

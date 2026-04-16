@@ -1279,15 +1279,21 @@ export const aiApi = {
    * 上传并使用 AI 分析 Markdown 文件
    */
   async analyzeMarkdown(
-    file: File,
+    file: File | null,
     options: {
+      docId?: string;
       analysisType?: MarkdownAnalysisType;
       userPrompt?: string;
       sectionNumber?: string;
     } = {}
   ): Promise<AIMarkdownAnalyzeResult> {
     const formData = new FormData();
-    formData.append('file', file);
+    if (file) {
+      formData.append('file', file);
+    }
+    if (options.docId) {
+      formData.append('doc_id', options.docId);
+    }
 
     const params = new URLSearchParams();
     if (options.analysisType) {
@@ -1432,7 +1438,8 @@ export const aiApi = {
    * 上传并使用 AI 分析 TXT 文本文件，提取结构化数据或生成图表
    */
   async analyzeTxt(
-    file: File,
+    file: File | null,
+    docId: string | null = null,
     analysisType: TxtAnalysisType = 'structured'
   ): Promise<{
     success: boolean;
@@ -1442,7 +1449,12 @@ export const aiApi = {
     error?: string;
   }> {
     const formData = new FormData();
-    formData.append('file', file);
+    if (file) {
+      formData.append('file', file);
+    }
+    if (docId) {
+      formData.append('doc_id', docId);
+    }
 
     const params = new URLSearchParams();
     params.append('analysis_type', analysisType);
@@ -1572,7 +1584,8 @@ export const aiApi = {
    * 使用 AI 解析 Word 文档，提取结构化数据或生成图表
    */
   async analyzeWordWithAI(
-    file: File,
+    file: File | null,
+    docId: string | null = null,
     userHint: string = '',
     analysisType: WordAnalysisType = 'structured'
   ): Promise<{
@@ -1583,7 +1596,12 @@ export const aiApi = {
     error?: string;
   }> {
     const formData = new FormData();
-    formData.append('file', file);
+    if (file) {
+      formData.append('file', file);
+    }
+    if (docId) {
+      formData.append('doc_id', docId);
+    }
     if (userHint) {
       formData.append('user_hint', userHint);
     }

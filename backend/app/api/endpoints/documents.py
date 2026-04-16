@@ -405,7 +405,7 @@ async def process_documents_batch(task_id: str, files: List[dict]):
                     if content and len(content) > 50:
                         await index_document_to_rag(doc_id, filename, result, file_info["ext"])
 
-                return {"index": index, "filename": filename, "doc_id": doc_id, "success": True}
+                return {"index": index, "filename": filename, "doc_id": doc_id, "file_path": file_info["path"], "success": True}
 
             except Exception as e:
                 logger.error(f"处理文件 {filename} 失败: {e}")
