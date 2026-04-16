@@ -184,7 +184,7 @@ class WordAIService:
             response = await self.llm.chat(
                 messages=messages,
                 temperature=0.1,
-                max_tokens=50000
+                max_tokens=8000
             )
 
             content = self.llm.extract_message_content(response)
@@ -276,7 +276,7 @@ class WordAIService:
             response = await self.llm.chat(
                 messages=messages,
                 temperature=0.1,
-                max_tokens=50000
+                max_tokens=8000
             )
 
             content = self.llm.extract_message_content(response)
@@ -849,10 +849,12 @@ class WordAIService:
 
             # 提取可用于图表的数据
             chart_data = None
+            logger.info(f"准备提取图表数据，structured_data type: {structured_data.get('type')}, keys: {list(structured_data.keys())}")
 
             if structured_data.get("type") == "table_data":
                 headers = structured_data.get("headers", [])
                 rows = structured_data.get("rows", [])
+                logger.info(f"table_data类型: headers数量={len(headers)}, rows数量={len(rows)}")
                 if headers and rows:
                     chart_data = {
                         "columns": headers,
@@ -860,15 +862,19 @@ class WordAIService:
                     }
             elif structured_data.get("type") == "structured_text":
                 tables_data = structured_data.get("tables", [])
+                logger.info(f"structured_text类型: tables数量={len(tables_data)}")
                 if tables_data and len(tables_data) > 0:
                     first_table = tables_data[0]
                     headers = first_table.get("headers", [])
                     rows = first_table.get("rows", [])
+                    logger.info(f"第一个表格: headers={headers[:5]}, rows数量={len(rows)}")
                     if headers and rows:
                         chart_data = {
                             "columns": headers,
                             "rows": rows
                         }
+            else:
+                logger.warning(f"无法识别的structured_data类型: {structured_data.get('type')}")
 
             # 生成可视化图表
             if chart_data:
@@ -904,3 +910,6 @@ class WordAIService:
                 "success": False,
                 "error": str(e)
             }
+
+
+word_ai_service = WordAIService()

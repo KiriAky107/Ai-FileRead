@@ -223,6 +223,177 @@ class ExcelAIService:
             }
         }
 
+    async def analyze_excel_file_from_path(
+        self,
+        file_path: str,
+        filename: str,
+        user_prompt: str = "",
+        analysis_type: str = "general",
+        parse_options: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
+        """
+        从文件路径分析 Excel 文件（用于从数据库加载的文档）
+
+        Args:
+            file_path: Excel 文件路径
+            filename: 文件名
+            user_prompt: 用户自定义提示词
+            analysis_type: 分析类型
+            parse_options: 解析选项
+
+        Returns:
+            Dict[str, Any]: 分析结果
+        """
+        # 1. 解析 Excel 文件
+        excel_data = None
+        parse_result_metadata = None
+        try:
+            parse_options = parse_options or {}
+            parse_result = self.parser.parse(file_path, **parse_options)
+
+            if not parse_result.success:
+                return {
+                    "success": False,
+                    "error": parse_result.error,
+                    "analysis": None
+                }
+
+            excel_data = parse_result.data
+            parse_result_metadata = parse_result.metadata
+            logger.info(f"Excel 解析成功: {parse_result_metadata}")
+
+        except Exception as e:
+            logger.error(f"Excel 解析失败: {str(e)}")
+            return {
+                "success": False,
+                "error": f"Excel 解析失败: {str(e)}",
+                "analysis": None
+            }
+
+        # 2. 调用 LLM 进行分析
+        try:
+            if user_prompt and user_prompt.strip():
+                llm_result = await self.llm_service.analyze_with_template(
+                    excel_data,
+                    user_prompt
+                )
+            else:
+                llm_result = await self.llm_service.analyze_excel_data(
+                    excel_data,
+                    user_prompt,
+                    analysis_type
+                )
+
+            logger.info(f"AI 分析完成: {llm_result['success']}")
+
+            return {
+                "success": True,
+                "excel": {
+                    "data": excel_data,
+                    "metadata": parse_result_metadata,
+                    "saved_path": file_path
+                },
+                "analysis": llm_result
+            }
+
+        except Exception as e:
+            logger.error(f"AI 分析失败: {str(e)}")
+            return {
+                "success": False,
+                "error": f"AI 分析失败: {str(e)}",
+                "excel": {
+                    "data": excel_data,
+                    "metadata": parse_result_metadata
+                },
+                "analysis": None
+            }
+
+    async def batch_analyze_sheets_from_path(
+        self,
+        file_path: str,
+        filename: str,
+        user_prompt: str = "",
+        analysis_type: str = "general"
+    ) -> Dict[str, Any]:
+        """
+        从文件路径批量分析 Excel 文件的所有工作表（用于从数据库加载的文档）
+
+        Args:
+            file_path: Excel 文件路径
+            filename: 文件名
+            user_prompt: 用户自定义提示词
+            analysis_type: 分析类型
+
+        Returns:
+            Dict[str, Any]: 分析结果
+        """
+        # 1. 解析所有工作表
+        try:
+            parse_result = self.parser.parse_all_sheets(file_path)
+
+            if not parse_result.success:
+                return {
+                    "success": False,
+                    "error": parse_result.error,
+                    "analysis": None
+                }
+
+            sheets_data = parse_result.data.get("sheets", {})
+            logger.info(f"Excel 解析成功，共 {len(sheets_data)} 个工作表")
+
+        except Exception as e:
+            logger.error(f"Excel 解析失败: {str(e)}")
+            return {
+                "success": False,
+                "error": f"Excel 解析失败: {str(e)}",
+                "analysis": None
+            }
+
+        # 2. 批量分析每个工作表
+        sheet_analyses = {}
+        errors = {}
+
+        for sheet_name, sheet_data in sheets_data.items():
+            try:
+                if user_prompt and user_prompt.strip():
+                    llm_result = await self.llm_service.analyze_with_template(
+                        sheet_data,
+                        user_prompt
+                    )
+                else:
+                    llm_result = await self.llm_service.analyze_excel_data(
+                        sheet_data,
+                        user_prompt,
+                        analysis_type
+                    )
+
+                sheet_analyses[sheet_name] = llm_result
+
+                if not llm_result["success"]:
+                    errors[sheet_name] = llm_result.get("error", "未知错误")
+
+                logger.info(f"工作表 '{sheet_name}' 分析完成")
+
+            except Exception as e:
+                logger.error(f"工作表 '{sheet_name}' 分析失败: {str(e)}")
+                errors[sheet_name] = str(e)
+
+        # 3. 组合结果
+        return {
+            "success": len(errors) == 0,
+            "excel": {
+                "sheets": sheets_data,
+                "metadata": parse_result.metadata,
+                "saved_path": file_path
+            },
+            "analysis": {
+                "sheets": sheet_analyses,
+                "total_sheets": len(sheets_data),
+                "successful": len(sheet_analyses) - len(errors),
+                "errors": errors
+            }
+        }
+
     def get_supported_analysis_types(self) -> List[str]:
         """获取支持的分析类型"""
         return [

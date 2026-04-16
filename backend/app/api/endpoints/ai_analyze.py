@@ -1,7 +1,7 @@
 """
 AI 分析 API 接口
 """
-from fastapi import APIRouter, UploadFile, File, HTTPException, Query, Body
+from fastapi import APIRouter, UploadFile, File, HTTPException, Query, Body, Form
 from fastapi.responses import StreamingResponse
 from typing import Optional
 import logging
@@ -21,7 +21,8 @@ router = APIRouter(prefix="/ai", tags=["AI 分析"])
 
 @router.post("/analyze/excel")
 async def analyze_excel(
-    file: UploadFile = File(...),
+    file: Optional[UploadFile] = File(None),
+    doc_id: Optional[str] = Form(None, description="文档ID（从数据库读取）"),
     user_prompt: str = Query("", description="用户自定义提示词"),
     analysis_type: str = Query("general", description="分析类型: general, summary, statistics, insights"),
     parse_all_sheets: bool = Query(False, description="是否分析所有工作表")
@@ -30,7 +31,8 @@ async def analyze_excel(
     上传并使用 AI 分析 Excel 文件
 
     Args:
-        file: 上传的 Excel 文件
+        file: 上传的 Excel 文件（与 doc_id 二选一）
+        doc_id: 文档ID（从数据库读取）
         user_prompt: 用户自定义提示词
         analysis_type: 分析类型
         parse_all_sheets: 是否分析所有工作表
@@ -38,7 +40,57 @@ async def analyze_excel(
     Returns:
         dict: 分析结果，包含 Excel 数据和 AI 分析结果
     """
-    # 检查文件类型
+    filename = None
+
+    # 从数据库读取模式
+    if doc_id:
+        try:
+            from app.core.database.mongodb import mongodb
+            doc = await mongodb.get_document(doc_id)
+            if not doc:
+                raise HTTPException(status_code=404, detail=f"文档不存在: {doc_id}")
+
+            filename = doc.get("metadata", {}).get("original_filename", "unknown.xlsx")
+            file_ext = filename.split('.')[-1].lower()
+
+            if file_ext not in ['xlsx', 'xls']:
+                raise HTTPException(status_code=400, detail=f"文档类型不是 Excel: {file_ext}")
+
+            file_path = doc.get("metadata", {}).get("file_path")
+            if not file_path:
+                raise HTTPException(status_code=400, detail="文档没有存储文件路径，请重新上传")
+
+            # 使用文件路径进行 AI 分析
+            if parse_all_sheets:
+                result = await excel_ai_service.batch_analyze_sheets_from_path(
+                    file_path=file_path,
+                    filename=filename,
+                    user_prompt=user_prompt,
+                    analysis_type=analysis_type
+                )
+            else:
+                result = await excel_ai_service.analyze_excel_file_from_path(
+                    file_path=file_path,
+                    filename=filename,
+                    user_prompt=user_prompt,
+                    analysis_type=analysis_type
+                )
+
+            if result.get("success"):
+                return result
+            else:
+                return result
+
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"从数据库读取 Excel 文档失败: {str(e)}")
+            raise HTTPException(status_code=500, detail=f"读取文档失败: {str(e)}")
+
+    # 文件上传模式
+    if not file:
+        raise HTTPException(status_code=400, detail="请提供文件或文档ID")
+
     if not file.filename:
         raise HTTPException(status_code=400, detail="文件名为空")
 
@@ -61,7 +113,11 @@ async def analyze_excel(
         # 读取文件内容
         content = await file.read()
 
-        logger.info(f"开始分析文件: {file.filename}, 分析类型: {analysis_type}")
+        # 验证文件内容不为空
+        if not content:
+            raise HTTPException(status_code=400, detail="文件内容为空，请确保文件已正确上传")
+
+        logger.info(f"开始分析文件: {file.filename}, 分析类型: {analysis_type}, 文件大小: {len(content)} bytes")
 
         # 调用 AI 分析服务
         if parse_all_sheets:
@@ -155,7 +211,7 @@ async def analyze_text(
 @router.post("/analyze/md")
 async def analyze_markdown(
     file: Optional[UploadFile] = File(None),
-    doc_id: Optional[str] = Query(None, description="文档ID（从数据库读取）"),
+    doc_id: Optional[str] = Form(None, description="文档ID（从数据库读取）"),
     analysis_type: str = Query("summary", description="分析类型: summary, outline, key_points, questions, tags, qa, statistics, section, charts"),
     user_prompt: str = Query("", description="用户自定义提示词"),
     section_number: Optional[str] = Query(None, description="指定章节编号，如 '一' 或 '（一）'")
@@ -198,7 +254,7 @@ async def analyze_markdown(
             if file_ext not in ['md', 'markdown']:
                 raise HTTPException(status_code=400, detail=f"文档类型不是 Markdown: {file_ext}")
 
-            content = doc.get("content", "")
+            content = doc.get("content") or ""
             if not content:
                 raise HTTPException(status_code=400, detail="文档内容为空")
 
@@ -392,7 +448,7 @@ async def get_markdown_outline(
 @router.post("/analyze/txt")
 async def analyze_txt(
     file: Optional[UploadFile] = File(None),
-    doc_id: Optional[str] = Query(None, description="文档ID（从数据库读取）"),
+    doc_id: Optional[str] = Form(None, description="文档ID（从数据库读取）"),
     analysis_type: str = Query("structured", description="分析类型: structured, charts")
 ):
     """
@@ -427,7 +483,7 @@ async def analyze_txt(
                 raise HTTPException(status_code=400, detail=f"文档类型不是 TXT: {file_ext}")
 
             # 使用数据库中的 content
-            text_content = doc.get("content", "")
+            text_content = doc.get("content") or ""
 
             if not text_content:
                 raise HTTPException(status_code=400, detail="文档内容为空")
@@ -498,8 +554,8 @@ async def analyze_txt(
 @router.post("/analyze/word")
 async def analyze_word(
     file: Optional[UploadFile] = File(None),
-    doc_id: Optional[str] = Query(None, description="文档ID（从数据库读取）"),
-    user_hint: str = Query("", description="用户提示词，如'请提取表格数据'"),
+    doc_id: Optional[str] = Form(None, description="文档ID（从数据库读取）"),
+    user_hint: str = Form("", description="用户提示词，如'请提取表格数据'"),
     analysis_type: str = Query("structured", description="分析类型: structured, charts")
 ):
     """
@@ -536,8 +592,9 @@ async def analyze_word(
                 raise HTTPException(status_code=400, detail=f"文档类型不是 Word: {file_ext}")
 
             # 使用数据库中的 content 进行分析
-            content = doc.get("content", "")
-            tables = doc.get("structured_data", {}).get("tables", [])
+            content = doc.get("content", "") or ""
+            structured_data = doc.get("structured_data") or {}
+            tables = structured_data.get("tables", [])
 
             # 调用 AI 分析服务，传入数据库内容
             if analysis_type == "charts":

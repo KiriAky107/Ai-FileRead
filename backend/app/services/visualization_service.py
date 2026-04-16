@@ -53,7 +53,11 @@ class VisualizationService:
                 }
 
             # 转换为 DataFrame
-            df = pd.DataFrame(rows, columns=columns)
+            # 过滤掉行数与列数不匹配的数据
+            valid_rows = [row for row in rows if len(row) == len(columns)]
+            if len(valid_rows) < len(rows):
+                logger.warning(f"过滤了 {len(rows) - len(valid_rows)} 行无效数据（列数不匹配）")
+            df = pd.DataFrame(valid_rows, columns=columns)
 
             # 根据列类型分类
             numeric_columns = df.select_dtypes(include=[np.number]).columns.tolist()
@@ -141,18 +145,18 @@ class VisualizationService:
         charts = {}
 
         # 1. 数值型列的直方图
-        charts["histograms"] = []
+        charts["numeric_charts"] = []
         for col in numeric_columns[:5]:  # 限制最多 5 个数值列
             chart_data = self._create_histogram(df[col], col)
             if chart_data:
-                charts["histograms"].append(chart_data)
+                charts["numeric_charts"].append(chart_data)
 
         # 2. 分类型列的条形图
-        charts["bar_charts"] = []
+        charts["categorical_charts"] = []
         for col in categorical_columns[:5]:  # 限制最多 5 个分类型列
             chart_data = self._create_bar_chart(df[col], col)
             if chart_data:
-                charts["bar_charts"].append(chart_data)
+                charts["categorical_charts"].append(chart_data)
 
         # 3. 数值型列的箱线图
         charts["box_plots"] = []

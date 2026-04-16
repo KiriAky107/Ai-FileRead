@@ -19,6 +19,7 @@ class TxtAIService:
 
     def __init__(self):
         self.parser = TxtParser()
+        self.llm = llm_service
 
     async def analyze_txt_with_ai(
         self,
@@ -114,7 +115,7 @@ class TxtAIService:
             response = await self.llm.chat(
                 messages=messages,
                 temperature=0.1,
-                max_tokens=50000
+                max_tokens=8000
             )
 
             content_text = self.llm.extract_message_content(response)
@@ -220,7 +221,7 @@ class TxtAIService:
             response = await self.llm.chat(
                 messages=messages,
                 temperature=0.1,
-                max_tokens=50000
+                max_tokens=8000
             )
 
             content_text = self.llm.extract_message_content(response)

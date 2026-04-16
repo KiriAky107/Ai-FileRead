@@ -1187,11 +1187,19 @@ export const aiApi = {
    * 上传并使用 AI 分析 Excel 文件
    */
   async analyzeExcel(
-    file: File,
-    options: AIAnalyzeOptions = {}
+    file: File | null,
+    options: AIAnalyzeOptions = {},
+    docId: string | null = null
   ): Promise<AIExcelAnalyzeResult> {
     const formData = new FormData();
-    formData.append('file', file);
+
+    if (docId) {
+      formData.append('doc_id', docId);
+    } else if (file) {
+      formData.append('file', file);
+    } else {
+      throw new Error('必须提供文件或文档ID');
+    }
 
     const params = new URLSearchParams();
     if (options.userPrompt) {
@@ -1268,7 +1276,9 @@ export const aiApi = {
     try {
       const response = await fetch(url);
       if (!response.ok) throw new Error('获取分析类型失败');
-      return await response.json();
+      const data = await response.json();
+      // 转换后端返回格式 {excel_types: [], markdown_types: []} 为前端期望的 {types: []}
+      return { types: data.excel_types || [] };
     } catch (error) {
       console.error('获取分析类型失败:', error);
       throw error;

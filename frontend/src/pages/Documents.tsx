@@ -472,11 +472,17 @@ const Documents: React.FC = () => {
     setAnalysisCharts(null);
 
     try {
-      const result = await aiApi.analyzeExcel(uploadedFile, {
-        userPrompt: aiOptions.userPrompt,
-        analysisType: aiOptions.analysisType,
-        parseAllSheets: aiOptions.parseAllSheetsForAI
-      });
+      // 判断是从历史文档还是本地上传
+      const docId = selectedDocument?.doc_id && uploadedFile.size === 0 ? selectedDocument.doc_id : null;
+      const result = await aiApi.analyzeExcel(
+        uploadedFile.size > 0 ? uploadedFile : null,
+        {
+          userPrompt: aiOptions.userPrompt,
+          analysisType: aiOptions.analysisType,
+          parseAllSheets: aiOptions.parseAllSheetsForAI
+        },
+        docId
+      );
 
       if (result.success) {
         toast.success('AI 分析完成');
@@ -706,6 +712,12 @@ const Documents: React.FC = () => {
 
   const handleSelectDocument = async (docId: string) => {
     setLoadingDocument(true);
+    // 重置所有 AI 分析结果，避免显示上一个文档的分析
+    setAiAnalysis(null);
+    setAnalysisCharts(null);
+    setMdAnalysis(null);
+    setWordAnalysis(null);
+    setTxtAnalysis(null);
     try {
       const result = await backendApi.getDocument(docId);
       if (result.success && result.document) {
@@ -2264,39 +2276,57 @@ const Documents: React.FC = () => {
   );
 };
 
-// 数据表格组件
+// 数据表格组件 - 滑动窗口样式
 const DataTable: React.FC<{ columns: string[]; rows: Record<string, any>[] }> = ({ columns, rows }) => {
   if (!columns.length || !rows.length) {
     return <div className="text-center py-8 text-muted-foreground text-sm">暂无数据</div>;
   }
 
+  const displayRows = rows.slice(0, 500); // 限制最多显示500行
+
   return (
-    <div className="rounded-lg border overflow-x-auto">
-      <TableComponent>
-        <TableHeader>
-          <TableRow>
-            <TableHead className="w-16 text-center text-muted-foreground">#</TableHead>
-            {columns.map((col, idx) => (
-              <TableHead key={idx} className="whitespace-nowrap">{col || `<列${idx + 1}>`}</TableHead>
-            ))}
-          </TableRow>
-        </TableHeader>
-        <TableBody>
-          {rows.slice(0, 100).map((row, rowIdx) => (
-            <TableRow key={rowIdx}>
-              <TableCell className="text-center text-muted-foreground font-medium">{rowIdx + 1}</TableCell>
-              {columns.map((col, colIdx) => (
-                <TableCell key={colIdx} className="whitespace-nowrap">
-                  {row[col] !== null && row[col] !== undefined ? String(row[col]) : '-'}
-                </TableCell>
+    <div className="rounded-lg border overflow-hidden">
+      {/* 表头 - 固定 */}
+      <div className="overflow-x-auto">
+        <TableComponent>
+          <TableHeader>
+            <TableRow className="bg-muted/50">
+              <TableHead className="w-16 text-center text-muted-foreground">#</TableHead>
+              {columns.map((col, idx) => (
+                <TableHead key={idx} className="whitespace-nowrap">{col || `<列${idx + 1}>`}</TableHead>
               ))}
             </TableRow>
-          ))}
-        </TableBody>
-      </TableComponent>
-      {rows.length > 100 && (
+          </TableHeader>
+        </TableComponent>
+      </div>
+      {/* 表体 - 可滚动 */}
+      <div
+        className="overflow-y-auto"
+        style={{ maxHeight: '400px' }}
+      >
+        <TableComponent>
+          <TableBody>
+            {displayRows.map((row, rowIdx) => (
+              <TableRow key={rowIdx}>
+                <TableCell className="text-center text-muted-foreground font-medium w-16">{rowIdx + 1}</TableCell>
+                {columns.map((col, colIdx) => (
+                  <TableCell key={colIdx} className="whitespace-nowrap">
+                    {row[col] !== null && row[col] !== undefined ? String(row[col]) : '-'}
+                  </TableCell>
+                ))}
+              </TableRow>
+            ))}
+          </TableBody>
+        </TableComponent>
+      </div>
+      {rows.length > 500 && (
         <div className="p-3 text-center text-sm text-muted-foreground bg-muted/30">
-          仅显示前 100 行数据
+          仅显示前 500 行数据（共 {rows.length} 行）
+        </div>
+      )}
+      {rows.length > 100 && rows.length <= 500 && (
+        <div className="p-2 text-center text-xs text-muted-foreground bg-muted/20">
+          共 {rows.length} 行数据，向下滚动查看更多
         </div>
       )}
     </div>

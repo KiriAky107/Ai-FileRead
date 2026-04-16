@@ -58,7 +58,7 @@ class LLMService:
         _start_time = time.time()
         logger.info(f"🤖 [LLM] 正在调用 DeepSeek API... 模型: {self.model_name}")
         try:
-            async with httpx.AsyncClient(timeout=60.0) as client:
+            async with httpx.AsyncClient(timeout=120.0) as client:
                 response = await client.post(
                     f"{self.base_url}/chat/completions",
                     headers=headers,
@@ -84,7 +84,7 @@ class LLMService:
                 pass
             raise
         except Exception as e:
-            logger.error(f"LLM API 调用异常: {str(e)}")
+            logger.error(f"LLM API 调用异常: {repr(e)} - {str(e)}")
             raise
 
     def extract_message_content(self, response: Dict[str, Any]) -> str:
