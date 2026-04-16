@@ -8,6 +8,7 @@ from typing import Dict, Any, List, Optional
 import json
 
 from app.services.llm_service import llm_service
+from app.services.visualization_service import visualization_service
 from app.core.document_parser.docx_parser import DocxParser
 
 logger = logging.getLogger(__name__)
@@ -634,6 +635,272 @@ class WordAIService:
 
         return values
 
+    async def generate_charts(
+        self,
+        file_path: str,
+        user_hint: str = ""
+    ) -> Dict[str, Any]:
+        """
+        使用 AI 解析 Word 文档并生成可视化图表
 
-# 全局单例
-word_ai_service = WordAIService()
+        从 Word 文档中提取表格数据，然后生成统计图表
+
+        Args:
+            file_path: Word 文件路径
+            user_hint: 用户提示词，指定要提取的内容类型
+
+        Returns:
+            Dict: 包含图表数据和统计信息的结果
+        """
+        try:
+            # 1. 先用基础解析器提取原始内容
+            parse_result = self.parser.parse(file_path)
+
+            if not parse_result.success:
+                return {
+                    "success": False,
+                    "error": parse_result.error,
+                    "structured_data": None
+                }
+
+            # 2. 获取原始数据
+            raw_data = parse_result.data
+            paragraphs = raw_data.get("paragraphs", [])
+            tables = raw_data.get("tables", [])
+            content = raw_data.get("content", "")
+
+            logger.info(f"Word 基础解析完成: {len(paragraphs)} 个段落, {len(tables)} 个表格")
+
+            # 3. 优先处理表格数据
+            if tables and len(tables) > 0:
+                structured_data = await self._extract_tables_with_ai(
+                    tables, paragraphs, 0, user_hint, parse_result.metadata
+                )
+            elif paragraphs and len(paragraphs) > 0:
+                structured_data = await self._extract_from_text_with_ai(
+                    paragraphs, content, 0, [], user_hint
+                )
+            else:
+                return {
+                    "success": False,
+                    "error": "文档内容为空",
+                    "structured_data": None
+                }
+
+            # 4. 检查是否有表格数据用于可视化
+            if not structured_data.get("success"):
+                return {
+                    "success": False,
+                    "error": structured_data.get("error", "解析失败"),
+                    "structured_data": None
+                }
+
+            parse_type = structured_data.get("type", "")
+
+            # 5. 提取可用于图表的数据
+            chart_data = None
+
+            if parse_type == "table_data":
+                headers = structured_data.get("headers", [])
+                rows = structured_data.get("rows", [])
+                if headers and rows:
+                    chart_data = {
+                        "columns": headers,
+                        "rows": rows
+                    }
+            elif parse_type == "structured_text":
+                tables = structured_data.get("tables", [])
+                if tables and len(tables) > 0:
+                    first_table = tables[0]
+                    headers = first_table.get("headers", [])
+                    rows = first_table.get("rows", [])
+                    if headers and rows:
+                        chart_data = {
+                            "columns": headers,
+                            "rows": rows
+                        }
+
+            # 6. 生成可视化图表
+            if chart_data:
+                logger.info(f"开始生成图表，列数: {len(chart_data['columns'])}, 行数: {len(chart_data['rows'])}")
+                vis_result = visualization_service.analyze_and_visualize(chart_data)
+
+                if vis_result.get("success"):
+                    return {
+                        "success": True,
+                        "charts": vis_result.get("charts", {}),
+                        "statistics": vis_result.get("statistics", {}),
+                        "distributions": vis_result.get("distributions", {}),
+                        "structured_data": structured_data,
+                        "row_count": vis_result.get("row_count", 0),
+                        "column_count": vis_result.get("column_count", 0)
+                    }
+                else:
+                    return {
+                        "success": False,
+                        "error": vis_result.get("error", "可视化生成失败"),
+                        "structured_data": structured_data
+                    }
+            else:
+                return {
+                    "success": False,
+                    "error": "文档中没有可用于图表的表格数据",
+                    "structured_data": structured_data
+                }
+
+        except Exception as e:
+            logger.error(f"Word 文档图表生成失败: {str(e)}")
+            return {
+                "success": False,
+                "error": str(e),
+                "structured_data": None
+            }
+
+
+    async def parse_word_with_ai_from_db(
+            self,
+        content: str,
+        tables: List[Dict],
+        filename: str = "",
+        user_hint: str = ""
+    ) -> Dict[str, Any]:
+        """
+        使用 AI 解析从数据库读取的 Word 文档内容，提取结构化数据
+
+        Args:
+            content: 文档文本内容
+            tables: 表格数据列表
+            filename: 文件名
+            user_hint: 用户提示词
+
+        Returns:
+            Dict: 包含结构化数据的解析结果
+        """
+        try:
+            # 解析段落
+            paragraphs = [p.strip() for p in content.split('\n') if p.strip()]
+
+            logger.info(f"从数据库解析 Word: {len(paragraphs)} 个段落, {len(tables)} 个表格")
+
+            # 优先处理表格数据
+            if tables and len(tables) > 0:
+                structured_data = await self._extract_tables_with_ai(
+                    tables, paragraphs, 0, user_hint, {"filename": filename}
+                )
+            elif paragraphs and len(paragraphs) > 0:
+                structured_data = await self._extract_from_text_with_ai(
+                    paragraphs, content, 0, [], user_hint
+                )
+            else:
+                structured_data = {
+                    "success": True,
+                    "type": "empty",
+                    "message": "文档内容为空"
+                }
+
+            return structured_data
+
+        except Exception as e:
+            logger.error(f"从数据库解析 Word 文档失败: {str(e)}")
+            return {
+                "success": False,
+                "error": str(e)
+            }
+
+    async def generate_charts_from_db(
+        self,
+        content: str,
+        tables: List[Dict],
+        filename: str = "",
+        user_hint: str = ""
+    ) -> Dict[str, Any]:
+        """
+        使用 AI 解析从数据库读取的 Word 文档并生成可视化图表
+
+        Args:
+            content: 文档文本内容
+            tables: 表格数据列表
+            filename: 文件名
+            user_hint: 用户提示词
+
+        Returns:
+            Dict: 包含图表数据和统计信息的结果
+        """
+        try:
+            # 解析段落
+            paragraphs = [p.strip() for p in content.split('\n') if p.strip()]
+
+            logger.info(f"从数据库生成 Word 图表: {len(paragraphs)} 个段落, {len(tables)} 个表格")
+
+            # 优先处理表格数据
+            if tables and len(tables) > 0:
+                structured_data = await self._extract_tables_with_ai(
+                    tables, paragraphs, 0, user_hint, {"filename": filename}
+                )
+            elif paragraphs and len(paragraphs) > 0:
+                structured_data = await self._extract_from_text_with_ai(
+                    paragraphs, content, 0, [], user_hint
+                )
+            else:
+                return {
+                    "success": False,
+                    "error": "文档内容为空"
+                }
+
+            # 提取可用于图表的数据
+            chart_data = None
+
+            if structured_data.get("type") == "table_data":
+                headers = structured_data.get("headers", [])
+                rows = structured_data.get("rows", [])
+                if headers and rows:
+                    chart_data = {
+                        "columns": headers,
+                        "rows": rows
+                    }
+            elif structured_data.get("type") == "structured_text":
+                tables_data = structured_data.get("tables", [])
+                if tables_data and len(tables_data) > 0:
+                    first_table = tables_data[0]
+                    headers = first_table.get("headers", [])
+                    rows = first_table.get("rows", [])
+                    if headers and rows:
+                        chart_data = {
+                            "columns": headers,
+                            "rows": rows
+                        }
+
+            # 生成可视化图表
+            if chart_data:
+                logger.info(f"开始生成图表，列数: {len(chart_data['columns'])}, 行数: {len(chart_data['rows'])}")
+                vis_result = visualization_service.analyze_and_visualize(chart_data)
+
+                if vis_result.get("success"):
+                    return {
+                        "success": True,
+                        "charts": vis_result.get("charts", {}),
+                        "statistics": vis_result.get("statistics", {}),
+                        "distributions": vis_result.get("distributions", {}),
+                        "structured_data": structured_data,
+                        "row_count": vis_result.get("row_count", 0),
+                        "column_count": vis_result.get("column_count", 0)
+                    }
+                else:
+                    return {
+                        "success": False,
+                        "error": vis_result.get("error", "可视化生成失败"),
+                        "structured_data": structured_data
+                    }
+            else:
+                return {
+                    "success": False,
+                    "error": "文档中没有可用于图表的表格数据",
+                    "structured_data": structured_data
+                }
+
+        except Exception as e:
+            logger.error(f"从数据库生成 Word 图表失败: {str(e)}")
+            return {
+                "success": False,
+                "error": str(e)
+            }

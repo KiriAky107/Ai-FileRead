@@ -10,7 +10,7 @@ import {
   ChevronDown,
   ChevronUp,
   FileSpreadsheet,
-  File,
+  File as FileIcon,
   Table,
   CheckCircle,
   AlertCircle,
@@ -107,12 +107,32 @@ const Documents: React.FC = () => {
   const [mdStreaming, setMdStreaming] = useState(false);
   const [mdStreamingContent, setMdStreamingContent] = useState('');
 
+  // Word AI 分析相关状态
+  const [wordAnalysis, setWordAnalysis] = useState<any>(null);
+  const [wordAnalysisType, setWordAnalysisType] = useState<'structured' | 'charts'>('structured');
+  const [wordUserHint, setWordUserHint] = useState('');
+
+  // TXT AI 分析相关状态
+  const [txtAnalysis, setTxtAnalysis] = useState<any>(null);
+  const [txtAnalysisType, setTxtAnalysisType] = useState<'structured' | 'charts'>('structured');
+
   // RAG 向量检索相关状态
   const [ragStatus, setRagStatus] = useState<{ vector_count: number; collections: string[] } | null>(null);
   const [ragSearchQuery, setRagSearchQuery] = useState('');
   const [ragSearching, setRagSearching] = useState(false);
   const [ragResults, setRagResults] = useState<any[]>([]);
   const [ragRebuilding, setRagRebuilding] = useState(false);
+
+  // 选中的文档详情
+  const [selectedDocument, setSelectedDocument] = useState<{
+    doc_id: string;
+    original_filename: string;
+    doc_type: string;
+    content?: string;
+    structured_data?: any;
+    metadata?: any;
+  } | null>(null);
+  const [loadingDocument, setLoadingDocument] = useState(false);
 
   // 解析选项
   const [parseOptions, setParseOptions] = useState({
@@ -268,6 +288,33 @@ const Documents: React.FC = () => {
                     return { ...s, status: 'failed', progress: 0, error: fileResult?.error || '处理失败' };
                   }
                 }));
+
+                // 设置第一个成功文件的 uploadedFile
+                const firstSuccessIdx = fileResults.findIndex((fr: any) => fr?.success);
+                if (firstSuccessIdx >= 0 && acceptedFiles[firstSuccessIdx]) {
+                  const firstFile = acceptedFiles[firstSuccessIdx];
+                  const firstResult = fileResults[firstSuccessIdx];
+                  const ext = firstFile.name.split('.').pop()?.toLowerCase();
+
+                  // 设置 uploadedFile
+                  setUploadedFile(firstFile);
+
+                  // 对于 Excel 文件，获取 parseResult
+                  if (ext === 'xlsx' || ext === 'xls') {
+                    // 调用 parseDocument 获取 parseResult
+                    if (firstResult?.file_path) {
+                      try {
+                        const parseResult = await backendApi.parseDocument(firstResult.file_path);
+                        if (parseResult.success) {
+                          setParseResult(parseResult as any);
+                        }
+                      } catch (parseErr) {
+                        console.warn('获取 parseResult 失败:', parseErr);
+                      }
+                    }
+                  }
+                }
+
                 loadDocuments();
                 return;
               } else if (status.status === 'failure') {
@@ -446,24 +493,79 @@ const Documents: React.FC = () => {
 
   // 基于 AI 分析生成图表
   const handleGenerateCharts = async () => {
-    if (!aiAnalysis || !aiAnalysis.success) {
+    // 检查是否有任何 AI 分析结果
+    const hasExcelAI = aiAnalysis?.success;
+    const hasMdAI = mdAnalysis?.success;
+    const hasWordAI = wordAnalysis?.success;
+    const hasTxtAI = txtAnalysis?.success;
+
+    if (!hasExcelAI && !hasMdAI && !hasWordAI && !hasTxtAI) {
       toast.error('请先进行 AI 分析');
       return;
     }
 
+    // 如果是 Markdown 分析已有图表，直接显示
+    if (hasMdAI && mdAnalysis?.chart_data?.tables) {
+      setAnalysisCharts({
+        success: true,
+        charts: { tables: mdAnalysis.chart_data.tables },
+        statistics: mdAnalysis.chart_data.key_statistics
+      });
+      toast.success('图表生成完成');
+      return;
+    }
+
+    // 如果是 Word 分析已有图表，直接显示
+    if (hasWordAI && wordAnalysis?.result?.charts) {
+      setAnalysisCharts({
+        success: true,
+        charts: wordAnalysis.result.charts,
+        statistics: wordAnalysis.result.statistics
+      });
+      toast.success('图表生成完成');
+      return;
+    }
+
+    // 如果是 TXT 分析已有图表，直接显示
+    if (hasTxtAI && txtAnalysis?.result?.charts) {
+      setAnalysisCharts({
+        success: true,
+        charts: txtAnalysis.result.charts,
+        statistics: txtAnalysis.result.statistics
+      });
+      toast.success('图表生成完成');
+      return;
+    }
+
+    // 尝试从各种分析结果中提取文本并生成图表
     let analysisText = '';
-    if (aiAnalysis.analysis?.analysis) {
-      analysisText = aiAnalysis.analysis.analysis;
-    } else if (aiAnalysis.analysis?.sheets) {
-      const sheets = aiAnalysis.analysis.sheets;
-      if (sheets && Object.keys(sheets).length > 0) {
-        const firstSheet = Object.keys(sheets)[0];
-        analysisText = sheets[firstSheet]?.analysis || '';
+    let fileType = 'unknown';
+
+    if (hasExcelAI) {
+      if (aiAnalysis.analysis?.analysis) {
+        analysisText = aiAnalysis.analysis.analysis;
+        fileType = 'excel';
+      } else if (aiAnalysis.analysis?.sheets) {
+        const sheets = aiAnalysis.analysis.sheets;
+        if (sheets && Object.keys(sheets).length > 0) {
+          const firstSheet = Object.keys(sheets)[0];
+          analysisText = sheets[firstSheet]?.analysis || '';
+          fileType = 'excel';
+        }
       }
+    } else if (hasMdAI && mdAnalysis?.analysis) {
+      analysisText = mdAnalysis.analysis;
+      fileType = 'markdown';
+    } else if (hasWordAI && wordAnalysis?.result?.summary) {
+      analysisText = wordAnalysis.result.summary;
+      fileType = 'word';
+    } else if (hasTxtAI && txtAnalysis?.result?.summary) {
+      analysisText = txtAnalysis.result.summary;
+      fileType = 'txt';
     }
 
     if (!analysisText?.trim()) {
-      toast.error('无法获取 AI 分析结果');
+      toast.error('无法获取 AI 分析文本结果');
       return;
     }
 
@@ -474,7 +576,7 @@ const Documents: React.FC = () => {
       const result = await aiApi.extractAndGenerateCharts({
         analysis_text: analysisText,
         original_filename: uploadedFile?.name || 'unknown',
-        file_type: 'excel'
+        file_type: fileType
       });
 
       if (result.success) {
@@ -592,10 +694,102 @@ const Documents: React.FC = () => {
       const result = await backendApi.deleteDocument(docId);
       if (result.success) {
         setDocuments(prev => prev.filter(d => d.doc_id !== docId));
+        if (selectedDocument?.doc_id === docId) {
+          setSelectedDocument(null);
+        }
         toast.success('文档已删除');
       }
     } catch (err: any) {
       toast.error('删除失败: ' + (err.message || '未知错误'));
+    }
+  };
+
+  const handleSelectDocument = async (docId: string) => {
+    setLoadingDocument(true);
+    try {
+      const result = await backendApi.getDocument(docId);
+      if (result.success && result.document) {
+        setSelectedDocument(result.document);
+        const doc = result.document;
+
+        // 优先使用 file_path 调用 parseDocument 获取完整解析结果
+        const filePath = doc.metadata?.file_path;
+        if (filePath) {
+          try {
+            const parseResult = await backendApi.parseDocument(filePath);
+            if (parseResult.success) {
+              setParseResult(parseResult as any);
+              const ext = doc.original_filename.split('.').pop()?.toLowerCase() || doc.doc_type;
+              const fakeFile = new File([], doc.original_filename, { type: getMimeType(ext) });
+              setUploadedFile(fakeFile);
+              toast.success('已加载文档: ' + doc.original_filename);
+              setLoadingDocument(false);
+              return;
+            } else {
+              console.warn('parseDocument returned success:false, using fallback');
+            }
+          } catch (parseErr) {
+            console.warn('parseDocument failed, fallback to structured_data:', parseErr);
+          }
+        }
+
+        // 后备：使用 structured_data 构建 parseResult
+        const ext = doc.original_filename.split('.').pop()?.toLowerCase() || doc.doc_type;
+        const fakeFile = new File([], doc.original_filename, { type: getMimeType(ext) });
+
+        if (doc.structured_data) {
+          const mockParseResult: ExcelParseResult = {
+            success: true,
+            data: {},
+            metadata: {
+              filename: doc.filename,
+              original_filename: doc.original_filename,
+              extension: doc.doc_type,
+              doc_type: doc.doc_type as any,
+              file_size: doc.metadata?.file_size || 0,
+            }
+          };
+          if (doc.structured_data.tables && doc.structured_data.tables.length > 0) {
+            const firstTable = doc.structured_data.tables[0];
+            mockParseResult.data = {
+              columns: firstTable.headers || [],
+              rows: (firstTable.rows || []).map((row: string[]) => {
+                const obj: Record<string, any> = {};
+                (firstTable.headers || []).forEach((h: string, i: number) => {
+                  obj[h] = row[i] || '';
+                });
+                return obj;
+              }),
+              row_count: firstTable.rows?.length || 0,
+              column_count: firstTable.headers?.length || 0,
+            };
+          }
+          if (doc.structured_data.sheets) {
+            mockParseResult.data.sheets = doc.structured_data.sheets;
+          }
+          setParseResult(mockParseResult);
+        } else if (doc.content) {
+          setParseResult({
+            success: true,
+            data: { content: doc.content },
+            metadata: {
+              filename: doc.filename,
+              original_filename: doc.original_filename,
+              extension: doc.doc_type,
+              doc_type: doc.doc_type as any,
+              file_size: doc.metadata?.file_size || 0,
+            }
+          });
+        }
+        setUploadedFile(fakeFile);
+        toast.success('已加载文档: ' + doc.original_filename);
+      } else {
+        toast.error(result.error || '获取文档详情失败');
+      }
+    } catch (err: any) {
+      toast.error(err.message || '获取文档详情失败');
+    } finally {
+      setLoadingDocument(false);
     }
   };
 
@@ -612,7 +806,7 @@ const Documents: React.FC = () => {
       case 'doc':
         return <FileText size={28} />;
       default:
-        return <File size={28} />;
+        return <FileIcon size={28} />;
     }
   };
 
@@ -632,11 +826,17 @@ const Documents: React.FC = () => {
     setMdAnalysis(null);
 
     try {
-      const result = await aiApi.analyzeMarkdown(uploadedFile, {
-        analysisType: mdAnalysisType,
-        userPrompt: mdUserPrompt,
-        sectionNumber: mdSelectedSection || undefined
-      });
+      // 判断是从历史文档还是本地上传
+      const docId = selectedDocument?.doc_id && uploadedFile.size === 0 ? selectedDocument.doc_id : undefined;
+      const result = await aiApi.analyzeMarkdown(
+        uploadedFile.size > 0 ? uploadedFile : null,
+        {
+          docId: docId || undefined,
+          analysisType: mdAnalysisType,
+          userPrompt: mdUserPrompt,
+          sectionNumber: mdSelectedSection || undefined
+        }
+      );
 
       if (result.success) {
         toast.success('Markdown AI 分析完成');
@@ -701,6 +901,71 @@ const Documents: React.FC = () => {
     }
   };
 
+  // Word AI 分析处理
+  const handleWordAnalyze = async () => {
+    if (!uploadedFile || !isWordFile(uploadedFile.name)) {
+      toast.error('请先上传 Word 文件');
+      return;
+    }
+
+    setAnalyzing(true);
+    setWordAnalysis(null);
+
+    try {
+      // 判断是从历史文档还是本地上传
+      const docId = selectedDocument?.doc_id && uploadedFile.size === 0 ? selectedDocument.doc_id : null;
+      const result = await aiApi.analyzeWordWithAI(
+        uploadedFile.size > 0 ? uploadedFile : null,
+        docId,
+        wordUserHint,
+        wordAnalysisType
+      );
+
+      if (result.success) {
+        toast.success('Word AI 分析完成');
+        setWordAnalysis(result);
+      } else {
+        toast.error(result.error || 'AI 分析失败');
+      }
+    } catch (error: any) {
+      toast.error(error.message || 'AI 分析失败');
+    } finally {
+      setAnalyzing(false);
+    }
+  };
+
+  // TXT AI 分析处理
+  const handleTxtAnalyze = async () => {
+    if (!uploadedFile || !isTxtFile(uploadedFile.name)) {
+      toast.error('请先上传 TXT 文件');
+      return;
+    }
+
+    setAnalyzing(true);
+    setTxtAnalysis(null);
+
+    try {
+      // 判断是从历史文档还是本地上传
+      const docId = selectedDocument?.doc_id && uploadedFile.size === 0 ? selectedDocument.doc_id : null;
+      const result = await aiApi.analyzeTxt(
+        uploadedFile.size > 0 ? uploadedFile : null,
+        docId,
+        txtAnalysisType
+      );
+
+      if (result.success) {
+        toast.success('TXT AI 分析完成');
+        setTxtAnalysis(result);
+      } else {
+        toast.error(result.error || 'AI 分析失败');
+      }
+    } catch (error: any) {
+      toast.error(error.message || 'AI 分析失败');
+    } finally {
+      setAnalyzing(false);
+    }
+  };
+
   const getMdAnalysisIcon = (type: string) => {
     switch (type) {
       case 'summary': return <FileText size={20} />;
@@ -724,6 +989,18 @@ const Documents: React.FC = () => {
     return `${(bytes / Math.pow(k, i)).toFixed(2)} ${sizes[i]}`;
   };
 
+  const getMimeType = (ext: string): string => {
+    const mimeTypes: Record<string, string> = {
+      'xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      'xls': 'application/vnd.ms-excel',
+      'docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+      'doc': 'application/msword',
+      'md': 'text/markdown',
+      'txt': 'text/plain',
+    };
+    return mimeTypes[ext] || 'application/octet-stream';
+  };
+
   const getAnalysisIcon = (type: string) => {
     switch (type) {
       case 'general': return <FileText size={20} />;
@@ -737,6 +1014,16 @@ const Documents: React.FC = () => {
   const isExcelFile = (filename: string) => {
     const ext = filename.split('.').pop()?.toLowerCase();
     return ext === 'xlsx' || ext === 'xls';
+  };
+
+  const isWordFile = (filename: string) => {
+    const ext = filename.split('.').pop()?.toLowerCase();
+    return ext === 'docx';
+  };
+
+  const isTxtFile = (filename: string) => {
+    const ext = filename.split('.').pop()?.toLowerCase();
+    return ext === 'txt';
   };
 
   return (
@@ -1055,7 +1342,7 @@ const Documents: React.FC = () => {
                         <FileText size={12} className="mr-1" /> Markdown
                       </Badge>
                       <Badge variant="outline" className="bg-gray-500/10 text-gray-600 border-gray-200 text-xs">
-                        <File size={12} className="mr-1" /> 文本
+                        <FileIcon size={12} className="mr-1" /> 文本
                       </Badge>
                     </div>
                   </div>
@@ -1063,6 +1350,38 @@ const Documents: React.FC = () => {
               </CardContent>
             )}
           </Card>
+
+          {/* 从历史文档中选择 */}
+          {documents.length > 0 && (
+            <Card className="border-none shadow-md">
+              <CardHeader className="pb-4">
+                <CardTitle className="flex items-center gap-2">
+                  <Clock className="text-primary" size={20} />
+                  从历史文档选择
+                </CardTitle>
+              </CardHeader>
+              <CardContent className="space-y-3">
+                <Select
+                  value=""
+                  onValueChange={async (docId) => {
+                    if (!docId) return;
+                    await handleSelectDocument(docId);
+                  }}
+                >
+                  <SelectTrigger className="bg-background">
+                    <SelectValue placeholder="选择历史文档..." />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {documents.slice(0, 20).map((doc) => (
+                      <SelectItem key={doc.doc_id} value={doc.doc_id}>
+                        {doc.original_filename}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </CardContent>
+            </Card>
+          )}
 
           {/* Excel 解析选项 */}
           {uploadedFile && isExcelFile(uploadedFile.name) && (
@@ -1238,8 +1557,117 @@ const Documents: React.FC = () => {
             </Card>
           )}
 
+          {/* Word AI 分析选项 */}
+          {uploadedFile && isWordFile(uploadedFile.name) && (
+            <Card className="border-none shadow-md bg-gradient-to-br from-blue-500/5 to-cyan-500/5">
+              <CardHeader className="pb-4">
+                <CardTitle className="flex items-center gap-2">
+                  <Sparkles className="text-blue-500" size={20} />
+                  Word AI 分析
+                </CardTitle>
+              </CardHeader>
+              <CardContent className="space-y-4">
+                <div className="space-y-2">
+                  <Label htmlFor="word-analysis-type" className="text-sm">分析类型</Label>
+                  <Select value={wordAnalysisType} onValueChange={(value: any) => setWordAnalysisType(value)}>
+                    <SelectTrigger id="word-analysis-type" className="bg-background">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="structured">
+                        <div className="flex items-center gap-2">
+                          <FileText size={16} />
+                          <div className="flex flex-col">
+                            <span className="font-medium">结构化提取</span>
+                            <span className="text-xs text-muted-foreground">提取表格、键值对等</span>
+                          </div>
+                        </div>
+                      </SelectItem>
+                      <SelectItem value="charts">
+                        <div className="flex items-center gap-2">
+                          <TrendingUp size={16} />
+                          <div className="flex flex-col">
+                            <span className="font-medium">数据图表</span>
+                            <span className="text-xs text-muted-foreground">生成可视化图表</span>
+                          </div>
+                        </div>
+                      </SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div className="space-y-2">
+                  <Label htmlFor="word-user-prompt" className="text-sm">自定义提示词（可选）</Label>
+                  <Textarea
+                    id="word-user-prompt"
+                    placeholder="例如：请提取文档中的表格数据..."
+                    value={wordUserHint}
+                    onChange={(e) => setWordUserHint(e.target.value)}
+                    className="bg-background resize-none"
+                    rows={2}
+                  />
+                </div>
+                <Button
+                  onClick={handleWordAnalyze}
+                  disabled={analyzing}
+                  className="w-full bg-gradient-to-r from-blue-500 to-cyan-600 hover:from-blue-500/90 hover:to-cyan-600/90"
+                >
+                  {analyzing ? <><Loader2 className="mr-2 animate-spin" size={16} /> 分析中...</> : <><Sparkles className="mr-2" size={16} />开始 AI 分析</>}
+                </Button>
+              </CardContent>
+            </Card>
+          )}
+
+          {/* TXT AI 分析选项 */}
+          {uploadedFile && isTxtFile(uploadedFile.name) && (
+            <Card className="border-none shadow-md bg-gradient-to-br from-amber-500/5 to-orange-500/5">
+              <CardHeader className="pb-4">
+                <CardTitle className="flex items-center gap-2">
+                  <Sparkles className="text-amber-500" size={20} />
+                  TXT AI 分析
+                </CardTitle>
+              </CardHeader>
+              <CardContent className="space-y-4">
+                <div className="space-y-2">
+                  <Label htmlFor="txt-analysis-type" className="text-sm">分析类型</Label>
+                  <Select value={txtAnalysisType} onValueChange={(value: any) => setTxtAnalysisType(value)}>
+                    <SelectTrigger id="txt-analysis-type" className="bg-background">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="structured">
+                        <div className="flex items-center gap-2">
+                          <FileText size={16} />
+                          <div className="flex flex-col">
+                            <span className="font-medium">结构化提取</span>
+                            <span className="text-xs text-muted-foreground">提取表格、键值对等</span>
+                          </div>
+                        </div>
+                      </SelectItem>
+                      <SelectItem value="charts">
+                        <div className="flex items-center gap-2">
+                          <TrendingUp size={16} />
+                          <div className="flex flex-col">
+                            <span className="font-medium">数据图表</span>
+                            <span className="text-xs text-muted-foreground">生成可视化图表</span>
+                          </div>
+                        </div>
+                      </SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+                <Button
+                  onClick={handleTxtAnalyze}
+                  disabled={analyzing}
+                  className="w-full bg-gradient-to-r from-amber-500 to-orange-600 hover:from-amber-500/90 hover:to-orange-600/90"
+                >
+                  {analyzing ? <><Loader2 className="mr-2 animate-spin" size={16} /> 分析中...</> : <><Sparkles className="mr-2" size={16} />开始 AI 分析</>}
+                </Button>
+              </CardContent>
+            </Card>
+          )}
+
           {/* 数据操作 */}
-          {parseResult?.success && (
+          {(parseResult?.success || aiAnalysis?.success || mdAnalysis?.success || wordAnalysis?.success || txtAnalysis?.success) && (
             <Card className="border-none shadow-md bg-gradient-to-br from-emerald-500/5 to-blue-500/5">
               <CardHeader className="pb-4">
                 <CardTitle className="flex items-center gap-2">
@@ -1248,7 +1676,7 @@ const Documents: React.FC = () => {
                 </CardTitle>
               </CardHeader>
               <CardContent className="space-y-3">
-                <Button onClick={handleGenerateCharts} disabled={!aiAnalysis?.success || analyzingForCharts} className="w-full bg-gradient-to-r from-primary to-purple-600 hover:from-primary/90 hover:to-purple-600/90">
+                <Button onClick={handleGenerateCharts} disabled={!(aiAnalysis?.success || mdAnalysis?.success || wordAnalysis?.success || txtAnalysis?.success) || analyzingForCharts} className="w-full bg-gradient-to-r from-primary to-purple-600 hover:from-primary/90 hover:to-purple-600/90">
                   {analyzingForCharts ? <><Loader2 className="mr-2 animate-spin" size={16} />生成中...</> : <><Brain size={16} className="mr-2" />AI 分析图表</>}
                 </Button>
                 <Button onClick={openExportDialog} variant="outline" className="w-full">
@@ -1334,6 +1762,114 @@ const Documents: React.FC = () => {
                 {mdStreamingContent && <Markdown content={mdStreamingContent} />}
                 {mdAnalysis?.analysis && !mdStreamingContent && <Markdown content={mdAnalysis.analysis} />}
                 {!mdAnalysis?.success && !mdStreamingContent && <p className="text-sm text-destructive">{mdAnalysis?.error || '分析失败'}</p>}
+              </CardContent>
+            </Card>
+          )}
+
+          {/* Word AI 分析结果 */}
+          {wordAnalysis && (
+            <Card className="border-none shadow-md border-l-4 border-l-blue-500">
+              <CardHeader>
+                <div className="flex items-center justify-between">
+                  <div className="space-y-1">
+                    <CardTitle className="flex items-center gap-2">
+                      <Sparkles className="text-blue-500" size={20} />
+                      Word AI 分析结果
+                    </CardTitle>
+                    {wordAnalysis.filename && (
+                      <CardDescription>
+                        {wordAnalysis.filename} • {wordAnalysis.analysis_type}
+                      </CardDescription>
+                    )}
+                  </div>
+                </div>
+              </CardHeader>
+              <CardContent className="max-h-[500px] overflow-y-auto">
+                {wordAnalysis.analysis_type === 'charts' && wordAnalysis.result?.charts ? (
+                  <AIChartDisplay
+                    charts={wordAnalysis.result.charts}
+                    statistics={wordAnalysis.result.statistics}
+                    distributions={wordAnalysis.result.distributions}
+                  />
+                ) : wordAnalysis.result?.success === false ? (
+                  <p className="text-sm text-destructive">{wordAnalysis.result?.error || wordAnalysis.error || '分析失败'}</p>
+                ) : wordAnalysis.result?.summary ? (
+                  <Markdown content={wordAnalysis.result.summary} />
+                ) : wordAnalysis.result?.headers && wordAnalysis.result?.rows ? (
+                  <div className="space-y-2">
+                    <p className="text-sm font-medium">提取的表格数据：</p>
+                    <div className="border rounded-lg overflow-x-auto">
+                      <TableComponent>
+                        <TableHeader>
+                          <TableRow>
+                            {wordAnalysis.result.headers.map((header: string, idx: number) => (
+                              <TableHead key={idx}>{header}</TableHead>
+                            ))}
+                          </TableRow>
+                        </TableHeader>
+                        <TableBody>
+                          {wordAnalysis.result.rows.slice(0, 20).map((row: string[], idx: number) => (
+                            <TableRow key={idx}>
+                              {row.map((cell: string, cidx: number) => (
+                                <TableCell key={cidx}>{cell}</TableCell>
+                              ))}
+                            </TableRow>
+                          ))}
+                        </TableBody>
+                      </TableComponent>
+                    </div>
+                  </div>
+                ) : (
+                  <p className="text-sm text-muted-foreground">分析完成，无数据</p>
+                )}
+              </CardContent>
+            </Card>
+          )}
+
+          {/* TXT AI 分析结果 */}
+          {txtAnalysis && (
+            <Card className="border-none shadow-md border-l-4 border-l-amber-500">
+              <CardHeader>
+                <div className="flex items-center justify-between">
+                  <div className="space-y-1">
+                    <CardTitle className="flex items-center gap-2">
+                      <Sparkles className="text-amber-500" size={20} />
+                      TXT AI 分析结果
+                    </CardTitle>
+                    {txtAnalysis.filename && (
+                      <CardDescription>
+                        {txtAnalysis.filename} • {txtAnalysis.analysis_type}
+                      </CardDescription>
+                    )}
+                  </div>
+                </div>
+              </CardHeader>
+              <CardContent className="max-h-[500px] overflow-y-auto">
+                {txtAnalysis.analysis_type === 'charts' && txtAnalysis.result?.charts ? (
+                  <AIChartDisplay
+                    charts={txtAnalysis.result.charts}
+                    statistics={txtAnalysis.result.statistics}
+                    distributions={txtAnalysis.result.distributions}
+                  />
+                ) : txtAnalysis.result?.success === false ? (
+                  <p className="text-sm text-destructive">{txtAnalysis.result?.error || txtAnalysis.error || '分析失败'}</p>
+                ) : txtAnalysis.result?.summary ? (
+                  <Markdown content={txtAnalysis.result.summary} />
+                ) : txtAnalysis.result?.key_values && Object.keys(txtAnalysis.result.key_values || {}).length > 0 ? (
+                  <div className="space-y-2">
+                    <p className="text-sm font-medium">提取的键值对：</p>
+                    <div className="grid grid-cols-2 gap-2">
+                      {Object.entries(txtAnalysis.result.key_values || {}).map(([key, value]: [string, any]) => (
+                        <div key={key} className="flex gap-2 p-2 bg-muted/30 rounded-lg">
+                          <span className="font-medium text-sm">{key}:</span>
+                          <span className="text-sm text-muted-foreground">{String(value)}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                ) : (
+                  <p className="text-sm text-muted-foreground">分析完成，无数据</p>
+                )}
               </CardContent>
             </Card>
           )}
@@ -1482,6 +2018,95 @@ const Documents: React.FC = () => {
             </CardContent>
           </Card>
 
+          {/* 已上传文档详情 */}
+          {selectedDocument && (
+            <Card className="border-none shadow-md border-l-4 border-l-cyan-500">
+              <CardHeader>
+                <div className="flex items-center justify-between">
+                  <div className="space-y-1">
+                    <CardTitle className="flex items-center gap-2">
+                      <FileText className="text-cyan-500" size={20} />
+                      文档详情
+                    </CardTitle>
+                    <CardDescription>
+                      {selectedDocument.original_filename} • {selectedDocument.doc_type.toUpperCase()}
+                    </CardDescription>
+                  </div>
+                  <Button variant="ghost" size="sm" onClick={() => setSelectedDocument(null)}>
+                    关闭
+                  </Button>
+                </div>
+              </CardHeader>
+              <CardContent className="max-h-[500px] overflow-y-auto">
+                {loadingDocument ? (
+                  <div className="flex items-center justify-center py-8">
+                    <Loader2 className="animate-spin" size={24} />
+                    <span className="ml-2">加载中...</span>
+                  </div>
+                ) : (
+                  <div className="space-y-4">
+                    {selectedDocument.structured_data?.tables && selectedDocument.structured_data.tables.length > 0 && (
+                      <div className="space-y-2">
+                        <p className="text-sm font-medium">表格数据：</p>
+                        {selectedDocument.structured_data.tables.slice(0, 3).map((table: any, idx: number) => (
+                          <div key={idx} className="border rounded-lg overflow-x-auto">
+                            {table.headers && (
+                              <TableComponent>
+                                <TableHeader>
+                                  <TableRow>
+                                    {table.headers.map((header: string, hIdx: number) => (
+                                      <TableHead key={hIdx}>{header}</TableHead>
+                                    ))}
+                                  </TableRow>
+                                </TableHeader>
+                                <TableBody>
+                                  {(table.rows || []).slice(0, 10).map((row: string[], rIdx: number) => (
+                                    <TableRow key={rIdx}>
+                                      {row.map((cell: string, cIdx: number) => (
+                                        <TableCell key={cIdx}>{cell}</TableCell>
+                                      ))}
+                                    </TableRow>
+                                  ))}
+                                </TableBody>
+                              </TableComponent>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                    {selectedDocument.structured_data?.key_values && Object.keys(selectedDocument.structured_data.key_values || {}).length > 0 && (
+                      <div className="space-y-2">
+                        <p className="text-sm font-medium">键值对数据：</p>
+                        <div className="grid grid-cols-2 gap-2">
+                          {Object.entries(selectedDocument.structured_data.key_values || {}).map(([key, value]: [string, any]) => (
+                            <div key={key} className="flex gap-2 p-2 bg-muted/30 rounded-lg">
+                              <span className="font-medium text-sm">{key}:</span>
+                              <span className="text-sm text-muted-foreground">{String(value)}</span>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                    {selectedDocument.content && (
+                      <div className="space-y-2">
+                        <p className="text-sm font-medium">文本内容预览：</p>
+                        <div className="p-3 bg-muted/30 rounded-lg max-h-[300px] overflow-y-auto">
+                          <p className="text-sm whitespace-pre-wrap font-mono">
+                            {selectedDocument.content.slice(0, 2000)}
+                            {selectedDocument.content.length > 2000 && '...'}
+                          </p>
+                        </div>
+                      </div>
+                    )}
+                    {!selectedDocument.content && !selectedDocument.structured_data?.tables && !selectedDocument.structured_data?.key_values && (
+                      <p className="text-sm text-muted-foreground text-center py-4">该文档没有可显示的内容</p>
+                    )}
+                  </div>
+                )}
+              </CardContent>
+            </Card>
+          )}
+
           {/* 文档列表 */}
           <Card className="border-none shadow-md">
             <CardHeader>
@@ -1509,7 +2134,14 @@ const Documents: React.FC = () => {
               ) : (filteredDocs?.length ?? 0) > 0 ? (
                 <div className="space-y-3">
                   {(filteredDocs || []).map(doc => (
-                    <div key={doc.doc_id} className="flex items-center gap-4 p-4 rounded-xl border border-transparent hover:bg-muted/30 transition-all group">
+                    <div
+                      key={doc.doc_id}
+                      className={cn(
+                        "flex items-center gap-4 p-4 rounded-xl border border-transparent hover:bg-muted/30 transition-all group cursor-pointer",
+                        selectedDocument?.doc_id === doc.doc_id && "bg-primary/5 border-primary/20"
+                      )}
+                      onClick={() => handleSelectDocument(doc.doc_id)}
+                    >
                       <div className={cn(
                         "w-10 h-10 rounded-lg flex items-center justify-center shrink-0",
                         doc.doc_type === 'xlsx' ? "bg-emerald-500/10 text-emerald-500" : "bg-blue-500/10 text-blue-500"
@@ -1522,7 +2154,10 @@ const Documents: React.FC = () => {
                           {doc.doc_type.toUpperCase()} • {format(new Date(doc.created_at), 'yyyy-MM-dd HH:mm')}
                         </p>
                       </div>
-                      <Button variant="ghost" size="icon" className="text-destructive hover:bg-destructive/10 opacity-0 group-hover:opacity-100" onClick={() => handleDelete(doc.doc_id)}>
+                      <Button variant="ghost" size="icon" className="text-destructive hover:bg-destructive/10 opacity-0 group-hover:opacity-100" onClick={(e) => {
+                        e.stopPropagation();
+                        handleDelete(doc.doc_id);
+                      }}>
                         <Trash2 size={16} />
                       </Button>
                     </div>
