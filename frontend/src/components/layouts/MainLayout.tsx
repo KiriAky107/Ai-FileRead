@@ -8,7 +8,8 @@ import {
   Menu,
   ChevronRight,
   Sparkles,
-  Clock
+  Clock,
+  FileDown
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
@@ -19,6 +20,7 @@ const navItems = [
   { name: '文档中心', path: '/documents', icon: FileText },
   { name: '智能填表', path: '/form-fill', icon: TableProperties },
   { name: '智能助手', path: '/assistant', icon: MessageSquareCode },
+  { name: '文档转PDF', path: '/pdf-converter', icon: FileDown },
   { name: '任务历史', path: '/task-history', icon: Clock },
 ];
 

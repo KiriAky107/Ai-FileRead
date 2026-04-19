@@ -1153,6 +1153,120 @@ export const backendApi = {
     }
   },
 
+  // ==================== PDF 转换 API ====================
+
+  /**
+   * 将文件转换为 PDF
+   */
+  /**
+   * PDF转换并直接下载（使用XHR，支持IDM拦截）
+   */
+  async convertAndDownloadPdf(file: File): Promise<void> {
+    return new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      xhr.open('POST', `${BACKEND_BASE_URL}/pdf/convert`);
+
+      xhr.onload = function() {
+        if (xhr.status >= 200 && xhr.status < 300) {
+          // 创建 blob 并触发下载
+          const blob = xhr.response;
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement('a');
+          a.href = url;
+          a.download = `${file.name.replace(/\.[^.]+$/, '')}.pdf`;
+          document.body.appendChild(a);
+          a.click();
+          document.body.removeChild(a);
+          URL.revokeObjectURL(url);
+          resolve();
+        } else {
+          reject(new Error(`转换失败: ${xhr.status}`));
+        }
+      };
+
+      xhr.onerror = function() {
+        reject(new Error('网络错误'));
+      };
+
+      const formData = new FormData();
+      formData.append('file', file);
+      xhr.responseType = 'blob';
+      xhr.send(formData);
+    });
+  },
+
+  /**
+   * PDF转换（返回Blob）
+   */
+  async convertToPdf(file: File): Promise<Blob> {
+    return new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      xhr.open('POST', `${BACKEND_BASE_URL}/pdf/convert`);
+
+      xhr.onload = function() {
+        if (xhr.status >= 200 && xhr.status < 300) {
+          resolve(xhr.response);
+        } else {
+          reject(new Error(`转换失败: ${xhr.status}`));
+        }
+      };
+
+      xhr.onerror = function() {
+        reject(new Error('网络错误'));
+      };
+
+      const formData = new FormData();
+      formData.append('file', file);
+      xhr.responseType = 'blob';
+      xhr.send(formData);
+    });
+  },
+
+  /**
+   * 批量将文件转换为 PDF
+   */
+  async batchConvertToPdf(files: File[]): Promise<Blob> {
+    const formData = new FormData();
+    files.forEach(file => formData.append('files', file));
+
+    const url = `${BACKEND_BASE_URL}/pdf/convert/batch`;
+
+    try {
+      const response = await fetch(url, {
+        method: 'POST',
+        body: formData,
+      });
+
+      if (!response.ok) {
+        const error = await response.json();
+        throw new Error(error.detail || '批量PDF转换失败');
+      }
+
+      return await response.blob();
+    } catch (error) {
+      console.error('批量PDF转换失败:', error);
+      throw error;
+    }
+  },
+
+  /**
+   * 获取支持的 PDF 转换格式
+   */
+  async getPdfSupportedFormats(): Promise<{
+    success: boolean;
+    formats: string[];
+  }> {
+    const url = `${BACKEND_BASE_URL}/pdf/formats`;
+
+    try {
+      const response = await fetch(url);
+      if (!response.ok) throw new Error('获取支持的格式失败');
+      return await response.json();
+    } catch (error) {
+      console.error('获取支持的格式失败:', error);
+      return { success: false, formats: ['docx', 'xlsx', 'txt', 'md'] };
+    }
+  }
 };
 
 // ==================== AI 分析 API ====================
@@ -1805,5 +1919,6 @@ export const aiApi = {
       console.error('获取会话列表失败:', error);
       return { success: false, conversations: [] };
     }
-  }
+  },
+
 };

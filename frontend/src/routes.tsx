@@ -4,6 +4,7 @@ import Documents from '@/pages/Documents';
 import TemplateFill from '@/pages/TemplateFill';
 import InstructionChat from '@/pages/InstructionChat';
 import TaskHistory from '@/pages/TaskHistory';
+import PdfConverter from '@/pages/PdfConverter';
 import MainLayout from '@/components/layouts/MainLayout';
 
 export const routes = [
@@ -30,6 +31,10 @@ export const routes = [
       {
         path: '/task-history',
         element: <TaskHistory />,
+      },
+      {
+        path: '/pdf-converter',
+        element: <PdfConverter />,
       },
     ],
   },

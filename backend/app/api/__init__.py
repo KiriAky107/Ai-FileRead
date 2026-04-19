@@ -15,6 +15,7 @@ from app.api.endpoints import (
     health,
     instruction,    # 智能指令
     conversation,   # 对话历史
+    pdf_converter,  # PDF转换
 )
 
 # 创建主路由
@@ -33,3 +34,4 @@ api_router.include_router(visualization.router)    # 可视化
 api_router.include_router(analysis_charts.router)  # 分析图表
 api_router.include_router(instruction.router)      # 智能指令
 api_router.include_router(conversation.router)     # 对话历史
+api_router.include_router(pdf_converter.router)   # PDF转换
