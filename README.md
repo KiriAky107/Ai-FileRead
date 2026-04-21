@@ -233,6 +233,77 @@ pnpm dev
 
 ---
 
+## Docker 部署 / Docker Deployment
+
+### 快速启动 / Quick Start
+
+```bash
+# 1. 复制环境变量模板并编辑
+cp .env.example .env
+# 编辑 .env 填入实际配置
+
+# 2. 启动所有服务
+docker compose up -d
+
+# 3. 查看日志
+docker compose logs -f
+
+# 4. 检查服务状态
+docker compose ps
+
+# 5. 更新部署
+docker compose up -d --build
+```
+
+### 服务说明 / Services
+
+| 服务 | 端口 | 说明 |
+|:---|:---|:---|
+| frontend | 80 | React 前端 (Nginx) |
+| backend | 8000 | FastAPI 后端 |
+| mongodb | 27017 | MongoDB 数据库 |
+| mysql | 3306 | MySQL 数据库 |
+| redis | 6379 | Redis 缓存/队列 |
+
+### 环境变量 / Environment Variables
+
+创建 `.env` 文件，参考 `.env.example`:
+
+```bash
+# 数据库配置
+MONGO_ROOT_USER=admin
+MONGO_ROOT_PASSWORD=your_password
+MONGODB_DB_NAME=document_system
+MYSQL_PASSWORD=your_password
+MYSQL_DATABASE=document
+REDIS_PASSWORD=your_password
+
+# LLM 配置
+LLM_API_KEY=your_api_key
+LLM_BASE_URL=https://api.deepseek.com
+LLM_MODEL_NAME=deepseek-chat
+
+# Supabase 配置
+SUPABASE_URL=https://your-project.supabase.co
+SUPABASE_ANON_KEY=your_anon_key
+SUPABASE_SERVICE_KEY=your_service_key
+```
+
+### 验证部署 / Verify Deployment
+
+```bash
+# 检查所有服务状态
+docker compose ps
+
+# 访问前端
+curl http://localhost
+
+# 检查后端健康
+curl http://localhost:8000/health
+```
+
+---
+
 ## 许可证 / License
 
 ISC
