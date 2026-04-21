@@ -26,37 +26,79 @@ A document understanding and multi-source data fusion system based on Large Lang
 
 ## 项目架构 / Project Architecture
 
+```mermaid
+flowchart TB
+    subgraph UI["用户界面 / User Interface"]
+        Frontend["React + TypeScript + shadcn/ui"]
+    end
+
+    subgraph Backend["FastAPI 后端 / Backend"]
+        Upload["上传 API<br/>/upload"]
+        Documents["文档管理<br/>/documents"]
+        RAG["RAG 检索<br/>/rag/search"]
+        AI["AI 分析<br/>/ai/analyze"]
+        Template["模板填充<br/>/templates/fill"]
+        Instruction["自然语言指令<br/>/instruction/execute"]
+        Visual["可视化<br/>/visualization"]
+    end
+
+    subgraph Data["数据层 / Data Layer"]
+        MongoDB["MongoDB<br/>文档存储"]
+        MySQL["MySQL<br/>结构化数据"]
+        Redis["Redis<br/>缓存/队列"]
+        FAISS["FAISS<br/>向量索引"]
+    end
+
+    UI --> Backend
+    Backend --> MongoDB
+    Backend --> MySQL
+    Backend --> Redis
+    MongoDB --> FAISS
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                         User Interface                           │
-│              (React + TypeScript + shadcn/ui)                    │
-└─────────────────────────────────────────────────────────────────┘
-                                │
-                                ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                      FastAPI Backend                             │
-│  ┌─────────────┐  ┌──────────────┐  ┌─────────────────────────┐ │
-│  │ Upload API  │  │ RAG Search   │  │ Natural Language       │ │
-│  │ /documents  │  │ /rag/search  │  │ /instruction/execute   │ │
-│  └─────────────┘  └──────────────┘  └─────────────────────────┘ │
-│  ┌─────────────┐  ┌──────────────┐  ┌─────────────────────────┐ │
-│  │ AI Analyze  │  │ Template Fill│  │ Visualization          │ │
-│  │ /ai/analyze │  │ /templates   │  │ /visualization         │ │
-│  └─────────────┘  └──────────────┘  └─────────────────────────┘ │
-└─────────────────────────────────────────────────────────────────┘
-                                │
-          ┌─────────────────────┼─────────────────────┐
-          ▼                     ▼                     ▼
-┌─────────────────┐   ┌─────────────────┐   ┌─────────────────┐
-│    MongoDB      │   │      MySQL      │   │      Redis      │
-│  (Documents)    │   │  (Structured)   │   │   (Cache/Queue) │
-└─────────────────┘   └─────────────────┘   └─────────────────┘
-          │
-          ▼
-┌─────────────────┐
-│     FAISS       │
-│ (Vector Index)  │
-└─────────────────┘
+
+---
+
+## 程序流程 / Program Flow
+
+```mermaid
+flowchart TD
+    Start([用户上传文档<br/>User Uploads Document]) --> Parse{解析文档格式<br/>Parse Document Format}
+
+    Parse -->|Excel| ParseXlsx["解析 Excel<br/>Parse XLSX"]
+    Parse -->|Word| ParseDocx["解析 Word<br/>Parse DOCX"]
+    Parse -->|Markdown| ParseMd["解析 Markdown<br/>Parse Markdown"]
+    Parse -->|Text| ParseTxt["解析文本<br/>Parse Text"]
+
+    ParseXlsx --> Store1[(存储到<br/>MongoDB)]
+    ParseDocx --> Store1
+    ParseMd --> Store1
+    ParseTxt --> Store1
+
+    Store1 --> Embed["Embedding 向量化<br/>Create Embeddings"]
+    Embed --> Index[(索引到<br/>FAISS)]
+
+    Index --> TaskCreated{创建任务<br/>Create Task}
+
+    TaskCreated -->|同步| ProcessSync["同步处理<br/>Sync Process"]
+    TaskCreated -->|异步| QueueTask["加入任务队列<br/>Queue to Celery"]
+
+    ProcessSync --> ReturnResult["返回结果<br/>Return Result"]
+
+    QueueTask --> CeleryWorker["Celery Worker<br/>异步处理"]
+    CeleryWorker --> LLM["调用 LLM<br/>Call LLM API"]
+    LLM --> StoreResult["存储结果<br/>Store Result"]
+    StoreResult --> ReturnAsync["返回任务ID<br/>Return Task ID"]
+
+    ReturnResult --> End([完成<br/>Complete])
+    ReturnAsync --> Poll{轮询任务状态<br/>Poll Task Status}
+    Poll -->|进行中| Poll
+    Poll -->|完成| GetResult["获取结果<br/>Get Result"]
+    GetResult --> End
+
+    style Start fill:#e1f5fe
+    style End fill:#c8e6c9
+    style LLM fill:#fff3e0
+    style CeleryWorker fill:#fff3e0
 ```
 
 ---
