@@ -34,8 +34,8 @@ def setup_logging():
     # 根日志配置
     log_level = logging.DEBUG if settings.DEBUG else logging.INFO
 
-    # 日志目录
-    log_dir = Path("data/logs")
+    # 日志目录 (使用 settings.BASE_DIR 确保跨平台一致)
+    log_dir = settings.BASE_DIR / "data" / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
 
     # 日志文件路径
