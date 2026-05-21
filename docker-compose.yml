@@ -58,7 +58,7 @@ services:
       - redis_data:/data
     networks:
       - filesread_network
-    command: redis-server --appendonly yes --requirepass ${REDIS_PASSWORD:-}
+    command: redis-server --appendonly yes
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s
