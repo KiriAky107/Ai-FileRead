@@ -8,12 +8,14 @@ FROM node:20-alpine AS builder
 
 WORKDIR /app
 
-# 复制 package 文件和锁文件
-COPY package.json pnpm-lock.yaml* ./
 
-# 安装 pnpm 并安装依赖
-RUN npm install -g pnpm && \
-    pnpm install --frozen-lockfile
+COPY package.json ./
+
+# 设置镜像源并安装
+RUN npm config set registry https://registry.npmmirror.com && \
+    npm install -g pnpm && \
+    pnpm config set registry https://registry.npmmirror.com && \
+    pnpm install --registry https://registry.npmmirror.com --no-frozen-lockfile
 
 # 复制源码
 COPY . .
